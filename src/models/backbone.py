@@ -2,12 +2,17 @@
 
 PointTransformerV3 is vendored as a git submodule under
 ``third_party/PointTransformerV3`` and is not a pip-installable package.
-We prepend its directory to ``sys.path`` at import time and import the
-``PointTransformerV3`` class directly from ``model.py``.
+Its ``model.py`` uses relative imports (``from .serialization import
+encode``), so we must load it as a *package* rather than by poking
+``sys.path`` and doing a top-level import. We register a synthetic
+package name pointing at the submodule directory and then load
+``model.py`` as a submodule of it.
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +20,24 @@ import torch
 import torch.nn as nn
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PTV3_PATH = _REPO_ROOT / "third_party" / "PointTransformerV3"
-if str(_PTV3_PATH) not in sys.path:
-    sys.path.insert(0, str(_PTV3_PATH))
+_PTV3_DIR = _REPO_ROOT / "third_party" / "PointTransformerV3"
+_PKG = "_ptv3_vendored"
 
-from model import PointTransformerV3  # noqa: E402  (import after sys.path munge)
+if _PKG not in sys.modules:
+    _pkg = types.ModuleType(_PKG)
+    _pkg.__path__ = [str(_PTV3_DIR)]
+    sys.modules[_PKG] = _pkg
+
+if f"{_PKG}.model" not in sys.modules:
+    _spec = importlib.util.spec_from_file_location(
+        f"{_PKG}.model",
+        _PTV3_DIR / "model.py",
+    )
+    _mod = importlib.util.module_from_spec(_spec)
+    sys.modules[f"{_PKG}.model"] = _mod
+    _spec.loader.exec_module(_mod)
+
+PointTransformerV3 = sys.modules[f"{_PKG}.model"].PointTransformerV3
 
 
 class SubdetectorEmbedding(nn.Module):
