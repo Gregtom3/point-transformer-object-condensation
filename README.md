@@ -132,6 +132,47 @@ conda env create -f environment.yml
 conda activate ptv3-oc-reco
 ```
 
+### CUDA compatibility (read this if the install fails)
+
+Every CUDA-linked dep in this stack — `torch`, `torch-scatter`,
+`torch-geometric`, `spconv`, `flash-attn` — ships pre-built wheels only
+for specific CUDA tags. **All of them must agree with the CUDA tag of
+your `torch` build.** If torch is cu121, you need `spconv-cu121` and the
+`torch-...+cu121.html` PyG wheel index; if they don't line up, pip will
+either pick a wheel that segfaults at import or fail to find one at all.
+
+Check what your torch was built against:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda)"
+```
+
+Supported combinations as of this writing:
+
+| torch CUDA | spconv wheel    | PyG wheel index                                        |
+|------------|-----------------|--------------------------------------------------------|
+| cu121      | `spconv-cu121`  | `https://data.pyg.org/whl/torch-2.3.0+cu121.html`      |
+| cu118      | `spconv-cu118`  | `https://data.pyg.org/whl/torch-2.1.0+cu118.html`      |
+
+There are **no published `spconv-cu122+` / `spconv-cu130` wheels** yet.
+If `torch.version.cuda` reports 12.2 or newer (e.g. a fresh `pip install
+torch` pulling 2.5+/cu124 or 2.11+/cu130), downgrade torch to a tag that
+spconv supports:
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install --index-url https://download.pytorch.org/whl/cu121 \
+    "torch==2.3.1" "torchvision==0.18.1" "torchaudio==2.3.1"
+
+pip install --find-links https://data.pyg.org/whl/torch-2.3.0+cu121.html \
+    torch-scatter torch-geometric
+pip install spconv-cu121
+```
+
+If you want to skip spconv entirely (CPU-only dev, no reconstruction
+runs), the OC loss and heads tests still pass — only
+`test_ptv3_forward_smoke` will be skipped.
+
 ### About flash-attn
 
 PTv3 prefers [FlashAttention](https://github.com/Dao-AILab/flash-attention),
