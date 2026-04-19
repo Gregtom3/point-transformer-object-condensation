@@ -1,0 +1,41 @@
+name: ptv3-oc-reco
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - pip
+  # Core scientific stack via conda for reproducible ABI.
+  - numpy
+  - scipy
+  - pandas
+  - pyyaml
+
+  # PyTorch + CUDA runtime. Swap pytorch-cuda=11.8 if your system lacks
+  # CUDA 12.x drivers.
+  - pytorch>=2.1
+  - pytorch-cuda=12.1
+  - torchvision
+  - torchaudio
+
+  # The rest via pip so CUDA-linked wheels resolve correctly.
+  - pip:
+      # CUDA 12.1 extension wheels (change +cu121 -> +cu118 to match the
+      # pytorch-cuda value above).
+      - --find-links https://data.pyg.org/whl/torch-2.1.0+cu121.html
+      - torch-scatter
+      - torch-geometric
+      - spconv-cu121
+      # flash-attn is optional; required by PTv3 if enable_flash=True.
+      # If you can't install it, set enable_flash=False in the model config.
+      - flash-attn
+      - timm
+      - addict
+      - omegaconf
+      - hydra-core
+      - wandb
+      - tensorboard
+      - pytest
+      # Object-condensation package, editable from the submodule.
+      - -e third_party/object_condensation[pytorch]

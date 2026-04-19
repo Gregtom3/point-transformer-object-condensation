@@ -1,0 +1,28 @@
+# Point Transformer V3 backbone — base configuration.
+#
+# Matches the default hyperparameters from the PTv3 paper's ScanNet
+# recipe. For CPU smoke tests or GPUs without FlashAttention, set
+# enable_flash: false and shrink {enc,dec}_patch_size to ~128.
+backbone:
+  in_channels: 32
+  order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+  stride: [2, 2, 2, 2]
+  enc_depths: [2, 2, 2, 6, 2]
+  enc_channels: [32, 64, 128, 256, 512]
+  enc_num_head: [2, 4, 8, 16, 32]
+  enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+  dec_depths: [2, 2, 2, 2]
+  dec_channels: [64, 64, 128, 256]
+  dec_num_head: [4, 4, 8, 16]
+  dec_patch_size: [1024, 1024, 1024, 1024]
+  mlp_ratio: 4
+  drop_path: 0.1
+  enable_flash: true
+  shuffle_orders: true
+  grid_size: 0.01
+
+heads:
+  cluster_dim: 4
+  hidden_dim: 128
+  n_pid_classes: 5
+  predict_momentum: true

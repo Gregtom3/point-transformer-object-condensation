@@ -1,0 +1,18 @@
+# Multi-subdetector hit dataset configuration.
+#
+# Each subdetector carries its own native feature layout. At load time
+# the dataset embeds each subdetector's features into a common width
+# (see src/models/backbone.py :: SubdetectorEmbedding) and tags them
+# with a learned subdetector-type token.
+root: null           # TODO: path to processed data
+split: train
+n_events: 8          # placeholder: size of the dummy dataset
+n_hits: 500
+n_subdetectors: 4
+n_features: 6
+
+subdetectors:
+  tracker:   { id: 0, in_features: 6 }
+  ecal:      { id: 1, in_features: 5 }
+  hcal:      { id: 2, in_features: 5 }
+  rich:      { id: 3, in_features: 4 }

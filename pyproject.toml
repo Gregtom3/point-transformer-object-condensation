@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptv3-oc-reco"
+version = "0.0.1"
+description = "Multi-subdetector particle reconstruction with Point Transformer V3 and Object Condensation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "gregtom3" }]
+
+# Runtime deps intentionally minimal here — torch + CUDA extensions
+# (torch-scatter, torch-geometric, spconv, flash-attn) must be installed
+# from their matching wheel indices; see requirements.txt / environment.yml
+# for the canonical install order.
+dependencies = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "pyyaml",
+  "omegaconf",
+  "hydra-core",
+  "timm",
+  "addict",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+logging = ["wandb", "tensorboard"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

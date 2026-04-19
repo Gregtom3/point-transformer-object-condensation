@@ -1,0 +1,6 @@
+[submodule "third_party/PointTransformerV3"]
+	path = third_party/PointTransformerV3
+	url = https://github.com/Pointcept/PointTransformerV3.git
+[submodule "third_party/object_condensation"]
+	path = third_party/object_condensation
+	url = https://github.com/object-condensation/object_condensation.git

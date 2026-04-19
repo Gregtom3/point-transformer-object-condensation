@@ -1,0 +1,39 @@
+defaults:
+  - _self_
+
+data:
+  root: null
+  split: train
+  n_events: 8
+  n_hits: 500
+  n_subdetectors: 4
+  n_features: 32          # matches model.backbone.in_channels
+
+model:
+  backbone:
+    in_channels: 32
+    enable_flash: false   # default off for CPU/dev; flip true on GPU
+    enc_patch_size: [128, 128, 128, 128, 128]
+    dec_patch_size: [128, 128, 128, 128]
+    grid_size: 0.01
+  heads:
+    cluster_dim: 4
+    hidden_dim: 128
+    n_pid_classes: 5
+    predict_momentum: true
+
+loss:
+  q_min: 1.0
+  noise_threshold: 0
+  max_n_rep: 0
+  payload_weight: 0.0     # disable payload losses until truth fields are wired up
+  torch_compile: false
+
+train:
+  batch_size: 2
+  trainer:
+    max_epochs: 1
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+    grad_clip: 1.0
+    log_every: 1

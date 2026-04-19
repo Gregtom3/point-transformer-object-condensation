@@ -1,0 +1,43 @@
+# Pip requirements for the PTv3 + Object Condensation reco pipeline.
+#
+# NOTE: torch and its CUDA-linked extensions (torch-scatter,
+# torch-geometric, spconv, flash-attn) MUST be installed in order from
+# matching wheel indices. Prefer running setup.sh, or follow the block
+# below manually. These lines are commented out because they cannot be
+# resolved without picking a CUDA version; uncomment the block that
+# matches your machine.
+#
+# --- CUDA 12.1 (recommended) ---
+# --extra-index-url https://download.pytorch.org/whl/cu121
+# torch>=2.1
+# --find-links https://data.pyg.org/whl/torch-2.1.0+cu121.html
+# torch-scatter
+# torch-geometric
+# spconv-cu121
+# flash-attn ; sys_platform == "linux"
+#
+# --- CUDA 11.8 ---
+# --extra-index-url https://download.pytorch.org/whl/cu118
+# torch>=2.1
+# --find-links https://data.pyg.org/whl/torch-2.1.0+cu118.html
+# torch-scatter
+# torch-geometric
+# spconv-cu118
+# flash-attn ; sys_platform == "linux"
+
+# Pure-Python / CPU deps (safe to pip install unconditionally):
+numpy
+scipy
+pandas
+pyyaml
+omegaconf
+hydra-core
+timm
+addict
+wandb
+tensorboard
+pytest
+
+# Install object_condensation from the submodule in editable mode with
+# its pytorch extra. Must be run AFTER torch is installed.
+-e third_party/object_condensation[pytorch]
