@@ -59,6 +59,12 @@ class GenConfig:
     ring_thickness: tuple[int, int] = (2, 5)
     shapes: tuple[str, ...] = tuple(SHAPE_NAMES)
     max_place_attempts: int = 100
+    # Minimum fraction of a new shape's pixels that must overlap with already-
+    # placed shapes (ignored for the first shape in an image). Non-zero values
+    # force dense, visually ambiguous packings that are harder to segment.
+    # Overlapping pixels belong to the first-placed shape (FCFS); the new
+    # shape only emits hits for pixels that weren't already claimed.
+    min_overlap: float = 0.1
     seed: int = 0
     stats: dict = field(default_factory=dict)
 
@@ -187,7 +193,7 @@ def generate_event(
     w_list: list[np.ndarray] = []
     h_list: list[np.ndarray] = []
 
-    for _ in range(n_shapes):
+    for shape_idx in range(n_shapes):
         placed = False
         for _ in range(cfg.max_place_attempts):
             shape = str(rng.choice(cfg.shapes))
@@ -196,15 +202,24 @@ def generate_event(
                 is_rectangle=(shape == "rectangle"),
             )
             local = make_shape_mask(shape, bw, bh, rng, cfg.ring_thickness)
-            # check non-overlap against previously placed shapes
             region = occupancy[y0:y0 + bh, x0:x0 + bw]
             if region.shape != local.shape:  # edge clipping; retry
                 continue
-            if (region & local).any():
+            new_claim = local & ~region
+            overlap = local & region
+            total = int(local.sum())
+            n_new = int(new_claim.sum())
+            if n_new == 0:
+                # fully occluded by earlier shapes — nothing visible to emit
                 continue
+            if shape_idx > 0 and cfg.min_overlap > 0.0:
+                # enforce dense packing: require enough shared pixels with
+                # existing shapes. First shape always passes.
+                if int(overlap.sum()) < cfg.min_overlap * total:
+                    continue
             occupancy[y0:y0 + bh, x0:x0 + bw] |= local
             color = _random_color(rng)
-            ys, xs = np.nonzero(local)
+            ys, xs = np.nonzero(new_claim)
             n_hits = xs.size
             if n_hits == 0:
                 continue
@@ -298,6 +313,13 @@ def parse_args() -> GenConfig:
     ap.add_argument("--shapes", nargs="+", default=SHAPE_NAMES,
                     choices=SHAPE_NAMES, help="shape types to sample from")
     ap.add_argument("--max-place-attempts", type=int, default=100)
+    ap.add_argument(
+        "--min-overlap",
+        type=float,
+        default=0.1,
+        help="Minimum fraction of a new shape's area that must overlap "
+             "existing shapes (0 disables, 0.1 default → dense packings).",
+    )
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     return GenConfig(
@@ -311,6 +333,7 @@ def parse_args() -> GenConfig:
         ring_thickness=tuple(args.ring_thickness),
         shapes=tuple(args.shapes),
         max_place_attempts=args.max_place_attempts,
+        min_overlap=args.min_overlap,
         seed=args.seed,
     )
 
@@ -335,6 +358,7 @@ def main() -> None:
         "shape_size": list(cfg.shape_size),
         "ring_thickness": list(cfg.ring_thickness),
         "shapes": list(cfg.shapes),
+        "min_overlap": cfg.min_overlap,
         "seed": cfg.seed,
     }
     meta_path = cfg.out / "metadata.json"

@@ -25,10 +25,10 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from src.data.shape_dataset import ShapeDataset, collate_shapes
 from src.inference.cluster import beta_threshold_cluster
 from src.models.backbone import PTv3Backbone
 from src.models.heads import ObjectCondensationHeads
+from src.tasks import ShapesTask
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,12 +83,12 @@ def main() -> None:
 
     root = Path(cfg.data.root)
     split_file = getattr(cfg.data, f"{args.split}_file")
-    ds = ShapeDataset(
+    task = ShapesTask(
         root / split_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
     )
-    loader = DataLoader(ds, batch_size=1, collate_fn=collate_shapes)
+    loader = DataLoader(task, batch_size=1, collate_fn=task.collate)
 
     backbone = PTv3Backbone(**OmegaConf.to_container(cfg.model.backbone, resolve=True)).to(device)
     heads = ObjectCondensationHeads(

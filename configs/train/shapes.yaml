@@ -60,5 +60,5 @@ train:
     log_every: 20
 
 inference:
-  t_beta: 0.1
-  t_d: 0.4
+  t_beta: 0.5                   # OC paper default for condensation-point cutoff
+  t_d: 0.28                     # OC paper default for cluster radius in x-space

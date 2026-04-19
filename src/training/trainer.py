@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 
 from src.inference.cluster import beta_threshold_cluster
+from src.tasks.base import OCTask
 from src.utils.tb_logging import (
     log_oc_embedding,
     log_prediction_grid,
@@ -61,8 +62,7 @@ class Trainer:
         config: TrainerConfig | None = None,
         tb_config: TBConfig | None = None,
         ckpt_dir: str | None = None,
-        viz_dataset: Dataset | None = None,
-        viz_collate=None,
+        viz_task: OCTask | None = None,
         config_dump: str = "",
     ) -> None:
         self.backbone = backbone
@@ -81,9 +81,10 @@ class Trainer:
         self._step = 0
         self.writer = self._make_writer()
 
+        self.viz_task = viz_task
         self._viz_batch = None
-        if viz_dataset is not None and viz_collate is not None:
-            self._viz_batch = self._build_viz_batch(viz_dataset, viz_collate)
+        if viz_task is not None:
+            self._viz_batch = self._build_viz_batch(viz_task)
 
         if self.writer is not None:
             log_run_description(self.writer, config_dump=config_dump)
@@ -96,11 +97,11 @@ class Trainer:
             print("WARN: tensorboard not available; scalars will be printed only")
             return None
 
-    def _build_viz_batch(self, dataset: Dataset, collate) -> dict[str, Any]:
+    def _build_viz_batch(self, task: OCTask) -> dict[str, Any]:
         rows, cols = self.tb_cfg.viz_grid
-        n_wanted = min(rows * cols, len(dataset))
-        items = [dataset[i] for i in range(n_wanted)]
-        return collate(items)
+        n_wanted = min(rows * cols, len(task))
+        items = [task[i] for i in range(n_wanted)]
+        return task.collate(items)
 
     # ---- per-step mechanics ------------------------------------------------
 
@@ -187,11 +188,12 @@ class Trainer:
         return out
 
     def _log_viz_grid(self) -> None:
-        if self._viz_batch is None:
+        if self._viz_batch is None or self.viz_task is None:
             return
         batch, preds, cluster_ids = self._viz_forward()
         log_prediction_grid(
-            self.writer, "viz/grid", batch, preds, cluster_ids, self._step,
+            self.writer, "viz/grid", self.viz_task, batch, preds, cluster_ids,
+            self._step,
             grid=self.tb_cfg.viz_grid, upscale=self.tb_cfg.viz_upscale,
         )
 

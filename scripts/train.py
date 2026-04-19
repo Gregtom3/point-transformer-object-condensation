@@ -16,10 +16,10 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-from src.data.shape_dataset import ShapeDataset, collate_shapes
 from src.losses.oc_loss import ObjectCondensationLoss
 from src.models.backbone import PTv3Backbone
 from src.models.heads import ObjectCondensationHeads
+from src.tasks import ShapesTask
 from src.training.trainer import TBConfig, Trainer, TrainerConfig
 from src.utils.model_summary import count_params, write_architecture_report
 
@@ -31,12 +31,12 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def _loader(ds: ShapeDataset, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
+def _loader(task: ShapesTask, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
     return DataLoader(
-        ds,
+        task,
         batch_size=batch_size,
         shuffle=shuffle,
-        collate_fn=collate_shapes,
+        collate_fn=task.collate,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
     )
@@ -48,18 +48,20 @@ def main() -> None:
     torch.manual_seed(int(cfg.train.seed))
 
     root = Path(cfg.data.root)
-    train_ds = ShapeDataset(
+    train_task = ShapesTask(
         root / cfg.data.train_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
     )
-    val_ds = ShapeDataset(
+    val_task = ShapesTask(
         root / cfg.data.val_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
     )
-    train_loader = _loader(train_ds, cfg.train.batch_size, True, cfg.train.num_workers)
-    val_loader = _loader(val_ds, cfg.train.batch_size, False, cfg.train.num_workers)
+    print(f"train: {train_task!r}")
+    print(f"val:   {val_task!r}")
+    train_loader = _loader(train_task, cfg.train.batch_size, True, cfg.train.num_workers)
+    val_loader = _loader(val_task, cfg.train.batch_size, False, cfg.train.num_workers)
 
     backbone = PTv3Backbone(**OmegaConf.to_container(cfg.model.backbone, resolve=True))
     heads = ObjectCondensationHeads(
@@ -79,8 +81,7 @@ def main() -> None:
             inference_t_d=cfg.inference.t_d,
         ),
         ckpt_dir=cfg.train.ckpt_dir,
-        viz_dataset=val_ds,
-        viz_collate=collate_shapes,
+        viz_task=val_task,
         config_dump=OmegaConf.to_yaml(cfg),
     )
 

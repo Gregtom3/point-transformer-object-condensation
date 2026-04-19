@@ -36,6 +36,7 @@ timm
 addict
 h5py
 pillow
+opencv-python-headless
 torchinfo
 onnx
 onnxscript

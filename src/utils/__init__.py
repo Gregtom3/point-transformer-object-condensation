@@ -4,5 +4,4 @@ from .tb_logging import (  # noqa: F401
     log_oc_embedding,
     log_prediction_grid,
     log_run_description,
-    render_prediction_grid,
 )
