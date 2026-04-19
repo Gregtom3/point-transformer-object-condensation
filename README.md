@@ -1,5 +1,17 @@
 # Point Transformer V3 + Object Condensation for Particle Reconstruction
 
+[![python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![pytorch](https://img.shields.io/badge/pytorch-%E2%89%A52.1-ee4c2c.svg)](https://pytorch.org/)
+[![tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)](./tests)
+[![license](https://img.shields.io/badge/license-MIT-informational.svg)](LICENSE)
+
+> [!TIP]
+> **Bringing your own data?** Start with
+> [`docs/custom_task.md`](docs/custom_task.md) — an end-to-end
+> walkthrough for plugging a new data format into the pipeline: task
+> class, runcard, training, evaluation, predictions back into HDF5 with
+> full provenance, and ONNX export.
+
 ## Project overview
 
 This repository is a scaffold for a **multi-subdetector particle
@@ -64,7 +76,11 @@ Inference: β > t_β ⟹ condensation point. Claim hits within ||x - x_c|| < t_d
 │   ├── data/detector.yaml    # subdetector feature layout
 │   └── train/default.yaml    # top-level train/eval config
 ├── src/
-│   ├── data/dataset.py       # hit-level dataset + collate_fn
+│   ├── tasks/                # OCTask base + concrete tasks (ShapesTask)
+│   │   └── README.md         #   ← interface reference
+│   ├── augmentations/        # per-event augmentations (rotation, jitter, dropout)
+│   │   └── README.md         #   ← contract + how to add your own
+│   ├── data/dataset.py       # (legacy) hit-level dataset skeleton
 │   ├── models/backbone.py    # PTv3 wrapper + SubdetectorEmbedding
 │   ├── models/heads.py       # OC heads (β, x, payload)
 │   ├── losses/oc_loss.py     # wraps condensation_loss_tiger + payload losses
@@ -77,7 +93,8 @@ Inference: β > t_β ⟹ condensation point. Claim hits within ||x - x_c|| < t_d
 │   └── architecture.md       # model flowchart and OC inference procedure
 ├── scripts/
 │   ├── train.py              # python scripts/train.py --config ...
-│   ├── evaluate.py
+│   ├── evaluate.py           # aggregate metrics (purity / efficiency / MAE)
+│   ├── export_predictions.py # writes per-hit preds + provenance back to HDF5
 │   ├── generate_data.py      # thin wrapper over data/generate_shapes.py
 │   └── export_onnx.py        # heads-only ONNX export (backbone stays in PyTorch)
 ├── tests/
@@ -250,6 +267,19 @@ startup: Mermaid flowchart, per-module parameter counts, and a
 
 ## Docs
 
+> [!IMPORTANT]
+> **New here? Read in this order.** [`docs/custom_task.md`](docs/custom_task.md) for the big picture and how your data slots in, then dive into the per-module references as you need them.
+
+- [`docs/custom_task.md`](docs/custom_task.md) — **end-to-end
+  onboarding guide**: from raw files to training, evaluation,
+  predictions-back-to-HDF5 with provenance, and ONNX export. Uses the
+  shapes pseudo-dataset as a worked reference.
+- [`src/tasks/README.md`](src/tasks/README.md) — the `OCTask` interface:
+  `__getitem__` / `collate` / `plot_truth` / `plot_pred` / `plot_oc`
+  contracts and the shared rendering helpers.
+- [`src/augmentations/README.md`](src/augmentations/README.md) — the
+  augmentation callable contract, the built-in set, and a minimal
+  skeleton for rolling your own.
 - [`docs/data_format.md`](docs/data_format.md) — event-level and batch-level
   schema, invariants (globally unique `object_id`, `0 = noise`), and the
   exact HDF5 layout produced by the shapes generator.

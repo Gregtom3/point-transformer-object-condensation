@@ -17,6 +17,8 @@ import h5py
 import numpy as np
 import torch
 
+from src.augmentations.base import Augmentation
+
 from .base import (
     BG_COLOR,
     OCTask,
@@ -46,6 +48,7 @@ class ShapesTask(OCTask):
         max_hits: int = 0,
         panel_hw: tuple[int, int] = (192, 192),
         projection: str = "pca",
+        augmentation: Augmentation | None = None,
     ) -> None:
         self.path = Path(path)
         self.normalize_coords = normalize_coords
@@ -54,6 +57,9 @@ class ShapesTask(OCTask):
         if projection not in ("pca", "umap"):
             raise ValueError(f"projection must be 'pca' or 'umap', got {projection!r}")
         self.projection = projection
+        # augmentations run once per __getitem__ call; keep them off for
+        # val/test by passing None so evaluation is deterministic.
+        self.augmentation = augmentation
 
         with h5py.File(self.path, "r") as f:
             self.n_events = int(f["meta"].attrs["n_events"])
@@ -114,7 +120,7 @@ class ShapesTask(OCTask):
             width = width / float(fw)
             height = height / float(fh)
 
-        return {
+        event = {
             "coord": torch.from_numpy(coord).float(),
             "feat": torch.from_numpy(feat).float(),
             "object_id": torch.from_numpy(object_id).long(),
@@ -123,6 +129,9 @@ class ShapesTask(OCTask):
             "height_per_hit": torch.from_numpy(height).float(),
             "frame": torch.tensor(self.frame, dtype=torch.long),
         }
+        if self.augmentation is not None:
+            event = self.augmentation(event)
+        return event
 
     def collate(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         keys_flat = [
