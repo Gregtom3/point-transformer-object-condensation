@@ -40,8 +40,8 @@ loss:
   torch_compile: false
   # per-head weights on top of payload_weight
   shape_id_weight: 1.0
-  width_weight: 0.1             # raw pixel sizes are O(10-40); downweighted
-  height_weight: 0.1
+  width_weight: 1.0             # targets are frame-normalized to [0, 1]
+  height_weight: 1.0
 
 train:
   batch_size: 2

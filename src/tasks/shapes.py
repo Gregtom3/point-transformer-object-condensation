@@ -104,6 +104,11 @@ class ShapesTask(OCTask):
             coord = coord.copy()
             coord[:, 0] /= float(fw)
             coord[:, 1] /= float(fh)
+            # Normalize bbox sizes too so the width/height regression target
+            # lives in the same numeric range as everything else (MSE on
+            # raw pixels is O(10³) and swamps the O(1) OC terms).
+            width = width / float(fw)
+            height = height / float(fh)
 
         return {
             "coord": torch.from_numpy(coord).float(),

@@ -150,6 +150,9 @@ def main() -> None:
 
     n = max(1, totals["events"])
     fg = max(1, totals["fg_hits"])
+    # width/height live in frame-normalized units during training; report
+    # them back in pixels for readability.
+    fw, fh = task.frame
     out = {
         "split": args.split,
         "events": totals["events"],
@@ -158,8 +161,8 @@ def main() -> None:
         "purity": totals["purity_sum"] / n,
         "efficiency": totals["efficiency_sum"] / n,
         "shape_accuracy": totals["shape_correct"] / max(1, totals["shape_total"]),
-        "width_mae": totals["width_abs_err"] / fg,
-        "height_mae": totals["height_abs_err"] / fg,
+        "width_mae_px": totals["width_abs_err"] / fg * fw,
+        "height_mae_px": totals["height_abs_err"] / fg * fh,
     }
     print(json.dumps(out, indent=2))
     args.out.parent.mkdir(parents=True, exist_ok=True)
