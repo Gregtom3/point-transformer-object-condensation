@@ -86,12 +86,19 @@ def _paint_cluster_canvas(
     fw: int,
     fh: int,
     label_to_color: dict[int, np.ndarray] | None = None,
+    unclaimed_color: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Return an (H, W, 3) uint8 canvas. ``coord_xy`` is (N, 2) int pixel coords."""
+    """Return an (H, W, 3) uint8 canvas. ``coord_xy`` is (N, 2) int pixel coords.
+
+    ``unclaimed_color`` (e.g. light gray) is used for hits with ``label <= 0``
+    so dropped-by-OC hits are distinguishable from "no hit here" white.
+    """
     canvas = np.broadcast_to(_BG_COLOR, (fh, fw, 3)).copy()
     for (x, y), l in zip(coord_xy, labels):
         il = int(l)
         if il <= 0:
+            if unclaimed_color is not None:
+                canvas[int(y), int(x)] = unclaimed_color
             continue
         if label_to_color is not None and il in label_to_color:
             color = label_to_color[il]
@@ -179,8 +186,15 @@ def _render_one_event(
         for p, m in mapping.items()
     }
 
+    # Light-gray for hits the OC inference didn't claim — makes "model
+    # dropped these as noise" visually distinct from "no hit at this pixel".
+    unclaimed = np.array([220, 220, 220], dtype=np.uint8)
     truth_img = _paint_cluster_canvas(xy, truth, fw, fh)
-    pred_img = _paint_cluster_canvas(xy, pred, fw, fh, label_to_color=pred_color_table)
+    pred_img = _paint_cluster_canvas(
+        xy, pred, fw, fh,
+        label_to_color=pred_color_table,
+        unclaimed_color=unclaimed,
+    )
     beta_img = _paint_beta_canvas(xy, beta, fw, fh)
 
     # optional per-panel labels, then upscale the whole cell together so
@@ -375,7 +389,13 @@ so you can watch them converge). Each cell stacks three rows:
    radius `t_d` in cluster-coord space). Colors are **matched** to truth:
    each predicted cluster gets the color of the truth object it most overlaps
    with, so a correctly-reconstructed shape shows the **same** color on both
-   rows. Predictions with no truth overlap (false positives) are drawn in gray.
+   rows. Predictions with no truth overlap (false positives) are drawn in
+   medium gray. Hits the OC inference did NOT claim (β below threshold, or
+   outside every condensation ball in cluster-coord space) are rendered in
+   **light gray** so you can tell "dropped by the model" apart from "no hit
+   at this pixel" (white). Early in training, expect most of each shape to
+   be light gray — β hasn't spiked yet. As training progresses those light
+   gray regions should fill in with matched color.
 3. **BETA** — per-pixel β heatmap (dark = low, yellow = high). A well-trained
    model spikes β in tight condensation regions near the shape centroids.
 
