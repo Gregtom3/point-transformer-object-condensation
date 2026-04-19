@@ -1,0 +1,64 @@
+defaults:
+  - _self_
+
+data:
+  root: data/shapes_v1
+  train_file: train.h5
+  val_file: val.h5
+  test_file: test.h5
+  normalize_coords: true
+  max_hits: 0
+
+model:
+  backbone:
+    in_channels: 3              # RGB
+    enable_flash: false         # flip to true on Ampere+ GPUs with flash-attn installed
+    enc_depths: [2, 2, 2, 2]
+    enc_channels: [32, 64, 128, 256]
+    enc_num_head: [2, 4, 8, 16]
+    enc_patch_size: [128, 128, 128, 128]
+    stride: [2, 2, 2]
+    dec_depths: [1, 1, 1]
+    dec_channels: [32, 64, 128]
+    dec_num_head: [2, 4, 8]
+    dec_patch_size: [128, 128, 128]
+    mlp_ratio: 2
+    drop_path: 0.0
+    shuffle_orders: true
+    grid_size: 0.005            # fine grid in [0,1]-normalized coords
+  heads:
+    cluster_dim: 3              # 3D OC space (easy to visualize)
+    hidden_dim: 128
+    n_pid_classes: 5            # 5 shape classes
+    predict_momentum: false     # repurposed to w/h only; momentum head disabled
+
+loss:
+  q_min: 1.0
+  noise_threshold: 0
+  max_n_rep: 0
+  payload_weight: 1.0
+  torch_compile: false
+  # per-head weights on top of payload_weight
+  shape_id_weight: 1.0
+  width_weight: 0.1             # raw pixel sizes are O(10-40); downweighted
+  height_weight: 0.1
+
+train:
+  batch_size: 2
+  num_workers: 0
+  seed: 0
+  log_dir: runs/shapes
+  ckpt_dir: outputs/shapes
+  save_every: 1                 # epochs
+  tb_image_every: 200           # steps
+  tb_embedding_every: 500       # steps
+  trainer:
+    max_epochs: 10
+    lr: 3.0e-4
+    weight_decay: 1.0e-4
+    grad_clip: 1.0
+    log_every: 20
+
+inference:
+  t_beta: 0.1
+  t_d: 0.4

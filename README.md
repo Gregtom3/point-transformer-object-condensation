@@ -70,11 +70,19 @@ Inference: β > t_β ⟹ condensation point. Claim hits within ||x - x_c|| < t_d
 │   ├── losses/oc_loss.py     # wraps condensation_loss_tiger + payload losses
 │   ├── training/trainer.py   # minimal training loop
 │   └── inference/cluster.py  # β-threshold + radius clustering
+├── data/
+│   └── generate_shapes.py    # shape-on-canvas generator (train/val/test → HDF5)
+├── docs/
+│   ├── data_format.md        # per-event batch schema and HDF5 layout
+│   └── architecture.md       # model flowchart and OC inference procedure
 ├── scripts/
 │   ├── train.py              # python scripts/train.py --config ...
-│   └── evaluate.py
+│   ├── evaluate.py
+│   ├── generate_data.py      # thin wrapper over data/generate_shapes.py
+│   └── export_onnx.py        # heads-only ONNX export (backbone stays in PyTorch)
 ├── tests/
-│   └── test_smoke.py         # import + dummy forward pass + OC loss sanity
+│   ├── test_smoke.py         # import + dummy forward pass + OC loss sanity
+│   └── test_shape_dataset.py # generator + HDF5 loader + loss roundtrip
 └── third_party/
     ├── PointTransformerV3/   # git submodule, pinned
     └── object_condensation/  # git submodule, pinned
@@ -203,6 +211,50 @@ To sanity-check the install:
 ```bash
 pytest tests/
 ```
+
+## Shapes pseudo-dataset (end-to-end example)
+
+A self-contained toy task: generate canvases of coloured geometric
+shapes, treat every non-white pixel as a hit, and train the OC pipeline
+to recover which hits belong to which shape plus each shape's class,
+width, and height.
+
+```bash
+# 1. generate splits (train / val / test) with globally unique object ids
+python data/generate_shapes.py --out data/shapes_v1 \
+    --n-train 800 --n-val 100 --n-test 100 \
+    --frame 128 128 --shapes-per-image 1 6 --shape-size 10 40 --seed 0
+
+# 2. train (TB logs: runs/shapes, checkpoints: outputs/shapes)
+python scripts/train.py --config configs/train/shapes.yaml
+
+# 3. watch training in TensorBoard
+tensorboard --logdir runs/shapes
+# scalars: per-component OC loss, shape-CE, width/height MSE, grad norm
+# images:  side-by-side truth vs. predicted cluster canvases
+# embedding: OC cluster-coord space coloured by object_id
+# histograms: beta distribution over training
+
+# 4. evaluate a checkpoint (writes JSON summary)
+python scripts/evaluate.py --config configs/train/shapes.yaml \
+    --checkpoint outputs/shapes/epoch_009.pt --split test
+
+# 5. export the heads to ONNX (backbone stays in PyTorch — see caveat)
+python scripts/export_onnx.py --config configs/train/shapes.yaml \
+    --checkpoint outputs/shapes/epoch_009.pt --out outputs/shapes/heads.onnx
+```
+
+`scripts/train.py` writes `<log_dir>/architecture/architecture.md` on
+startup: Mermaid flowchart, per-module parameter counts, and a
+`torchinfo` layer table for the heads.
+
+## Docs
+
+- [`docs/data_format.md`](docs/data_format.md) — event-level and batch-level
+  schema, invariants (globally unique `object_id`, `0 = noise`), and the
+  exact HDF5 layout produced by the shapes generator.
+- [`docs/architecture.md`](docs/architecture.md) — Mermaid flowchart of
+  the model and the OC inference procedure.
 
 ## Submodule maintenance
 

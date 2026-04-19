@@ -34,6 +34,11 @@ dependencies:
       - addict
       - omegaconf
       - hydra-core
+      - h5py
+      - pillow
+      - torchinfo
+      - onnx
+      - onnxscript
       - wandb
       - tensorboard
       - pytest

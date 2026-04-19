@@ -111,10 +111,19 @@ def test_heads_forward():
 
     n, d = 128, 64
     feat = torch.randn(n, d)
-    heads = ObjectCondensationHeads(in_dim=d, cluster_dim=4, n_pid_classes=5)
+    heads = ObjectCondensationHeads(
+        in_dim=d,
+        cluster_dim=4,
+        n_pid_classes=5,
+        predict_width_height=True,
+        predict_energy=True,
+        predict_momentum=True,
+    )
     out = heads(feat)
     assert out["beta"].shape == (n,)
     assert out["x"].shape == (n, 4)
+    assert out["width"].shape == (n,)
+    assert out["height"].shape == (n,)
     assert out["energy"].shape == (n,)
     assert out["momentum"].shape == (n, 3)
     assert out["pid_logits"].shape == (n, 5)

@@ -24,6 +24,12 @@ dependencies = [
   "hydra-core",
   "timm",
   "addict",
+  "h5py",
+  "pillow",
+  "torchinfo",
+  "tensorboard",
+  "onnx",
+  "onnxscript",
 ]
 
 [project.optional-dependencies]

@@ -37,7 +37,8 @@ if [[ "${SKIP_FLASH:-0}" != "1" ]]; then
 fi
 
 echo "[5/5] Installing remaining requirements + object_condensation"
-pip install numpy scipy pandas pyyaml omegaconf hydra-core timm addict wandb tensorboard pytest
+pip install numpy scipy pandas pyyaml omegaconf hydra-core timm addict \
+    h5py pillow torchinfo onnx onnxscript wandb tensorboard pytest
 pip install -e "third_party/object_condensation[pytorch]"
 
 echo "Done. Run 'pytest tests/' to verify the install."

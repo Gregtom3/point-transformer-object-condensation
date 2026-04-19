@@ -1,0 +1,11 @@
+# Shapes pseudo-dataset configuration.
+#
+# Generate the files with:
+#   python data/generate_shapes.py --out data/shapes_v1 \
+#       --n-train 800 --n-val 100 --n-test 100 --frame 128 128
+root: data/shapes_v1
+train_file: train.h5
+val_file: val.h5
+test_file: test.h5
+normalize_coords: true
+max_hits: 0           # 0 disables subsampling
