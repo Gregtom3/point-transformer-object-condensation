@@ -62,3 +62,10 @@ train:
 inference:
   t_beta: 0.5                   # OC paper default for condensation-point cutoff
   t_d: 0.28                     # OC paper default for cluster radius in x-space
+
+viz:
+  # OC panel 2D projection when cluster_dim > 2. Options:
+  #   pca  — linear, stable, very fast (default)
+  #   umap — non-linear, better for well-separated clusters; slower
+  # If cluster_dim <= 2 the setting is ignored (identity).
+  oc_projection: pca

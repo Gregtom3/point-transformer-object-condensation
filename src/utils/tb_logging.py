@@ -92,23 +92,25 @@ always aligned with the data format being trained on.
 
 ## SCALARS tab
 
-All scalars are logged under two prefixes:
+Scalars are grouped so loss components sit under their own section and
+diagnostic quantities like the gradient norm stay separate:
 
-- **`train/*`** — logged every step.
-- **`val/*`** — logged once per epoch (mean across the val split).
+- **`train/loss/*`** — objective components, logged every step.
+- **`val/loss/*`** — same components averaged over the val split, once per epoch.
+- **`train/grad_norm`** — L2 norm of the full-model gradient before clipping;
+  spikes signal an exploding gradient (clip threshold: `grad_clip` in config).
 
-Key scalars:
+Loss components (same keys under both `train/loss/` and `val/loss/`):
 
 | tag | what it is | what to watch for |
 |---|---|---|
-| `*/total` | weighted sum of every loss component — the quantity AdamW actually minimizes | should decrease; any sudden spike usually means a bad batch or LR too high |
-| `*/oc_attractive` | OC attractive potential: pulls same-object hits toward the condensation point | should drop fastest early in training |
-| `*/oc_repulsive` | OC repulsive potential: pushes different-object hits apart | drops more slowly; floor is set by `q_min` |
-| `*/oc_coward` | OC "coward" penalty on low-beta hits in real objects | keeps beta from collapsing to zero |
-| `*/oc_noise` | penalty on noise hits with high beta (NaN/0 if no noise in the event) | usually flat/zero on the shapes dataset |
-| `*/shape_id` | cross-entropy for shape-class prediction over foreground hits | drops once clustering starts working |
-| `*/width`, `*/height` | MSE of per-hit width/height regression (pixels²) | expect ~10–50 early, <5 when converged |
-| `*/grad_norm` | L2 norm of the full-model gradient before clipping | spikes indicate an exploding gradient; clip threshold is `grad_clip` in config |
+| `.../total` | weighted sum of every loss component — the quantity AdamW actually minimizes | should decrease; any sudden spike usually means a bad batch or LR too high |
+| `.../oc_attractive` | OC attractive potential: pulls same-object hits toward the condensation point | should drop fastest early in training |
+| `.../oc_repulsive` | OC repulsive potential: pushes different-object hits apart | drops more slowly; floor is set by `q_min` |
+| `.../oc_coward` | OC "coward" penalty on low-beta hits in real objects | keeps beta from collapsing to zero |
+| `.../oc_noise` | penalty on noise hits with high beta (NaN/0 if no noise in the event) | usually flat/zero on the shapes dataset |
+| `.../shape_id` | cross-entropy for shape-class prediction over foreground hits | drops once clustering starts working |
+| `.../width`, `.../height` | MSE of per-hit width/height regression in frame-normalized units | expect ~0.1 early, <0.01 when converged |
 
 ---
 
@@ -132,9 +134,10 @@ every step, so you can watch them converge). Each cell stacks three panels:
    is colored by its **input RGB feature** (the color the shape has in the
    source image) and alpha-blended against white by β — high-β hits are
    fully opaque, low-β hits fade out. If `cluster_dim > 2`, coordinates are
-   reduced to 2D with PCA (no t-SNE / UMAP). A small inset of the shape
-   image is pasted top-right so you can tie each OC-space cluster back to
-   the shape that produced it.
+   reduced to 2D by the projection selected in `viz.oc_projection` (`pca`
+   default, or `umap` for non-linear reduction on well-separated clusters).
+   A small inset of the shape image is pasted top-right so you can tie each
+   OC-space cluster back to the shape that produced it.
 
 ---
 

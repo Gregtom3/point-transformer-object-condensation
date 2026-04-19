@@ -48,15 +48,18 @@ def main() -> None:
     torch.manual_seed(int(cfg.train.seed))
 
     root = Path(cfg.data.root)
+    oc_projection = getattr(getattr(cfg, "viz", object()), "oc_projection", "pca")
     train_task = ShapesTask(
         root / cfg.data.train_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
+        projection=oc_projection,
     )
     val_task = ShapesTask(
         root / cfg.data.val_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
+        projection=oc_projection,
     )
     print(f"train: {train_task!r}")
     print(f"val:   {val_task!r}")

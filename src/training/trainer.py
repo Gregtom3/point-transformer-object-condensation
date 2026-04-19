@@ -143,10 +143,13 @@ class Trainer:
         self.optim.step()
 
         if self.writer is not None:
-            scalars = {k: float(v.detach()) for k, v in losses.items()
-                       if torch.is_tensor(v) and v.dim() == 0}
-            scalars["grad_norm"] = float(grad_norm)
-            log_scalars(self.writer, "train", scalars, self._step)
+            # Loss components go under ``train/loss/*`` so TB groups them
+            # visually and it's obvious at a glance which scalars are the
+            # objective's parts vs diagnostics like the gradient norm.
+            loss_scalars = {k: float(v.detach()) for k, v in losses.items()
+                            if torch.is_tensor(v) and v.dim() == 0}
+            log_scalars(self.writer, "train/loss", loss_scalars, self._step)
+            self.writer.add_scalar("train/grad_norm", float(grad_norm), self._step)
             self.writer.add_histogram("train/beta", preds["beta"].detach(), self._step)
 
             if self._step % self.tb_cfg.image_every == 0:
@@ -254,6 +257,6 @@ class Trainer:
                 val = self.validate(val_loader)
                 print(f"[epoch {epoch}] val: {val}")
                 if self.writer is not None:
-                    log_scalars(self.writer, "val", val, self._step)
+                    log_scalars(self.writer, "val/loss", val, self._step)
             if self.ckpt_dir is not None:
                 self.save_checkpoint(self.ckpt_dir / f"epoch_{epoch:03d}.pt")

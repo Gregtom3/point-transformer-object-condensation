@@ -45,11 +45,15 @@ class ShapesTask(OCTask):
         normalize_coords: bool = True,
         max_hits: int = 0,
         panel_hw: tuple[int, int] = (192, 192),
+        projection: str = "pca",
     ) -> None:
         self.path = Path(path)
         self.normalize_coords = normalize_coords
         self.max_hits = max_hits
         self.panel_hw = panel_hw
+        if projection not in ("pca", "umap"):
+            raise ValueError(f"projection must be 'pca' or 'umap', got {projection!r}")
+        self.projection = projection
 
         with h5py.File(self.path, "r") as f:
             self.n_events = int(f["meta"].attrs["n_events"])

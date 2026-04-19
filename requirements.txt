@@ -37,6 +37,7 @@ addict
 h5py
 pillow
 opencv-python-headless
+umap-learn
 torchinfo
 onnx
 onnxscript

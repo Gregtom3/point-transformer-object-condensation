@@ -69,6 +69,43 @@ def pca_to_2d(x: np.ndarray) -> np.ndarray:
     return (xc @ vt.T[:, :2]).astype(np.float32)
 
 
+def umap_to_2d(x: np.ndarray, random_state: int = 42) -> np.ndarray:
+    """Non-linear projection of ``x`` (N, D) to (N, 2) via UMAP.
+
+    Falls back to :func:`pca_to_2d` when D ≤ 2 (nothing to reduce), when
+    there are too few points for UMAP to be meaningful, or when
+    ``umap-learn`` isn't installed — so enabling UMAP in the config can't
+    crash a run that otherwise works.
+    """
+    if x.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if x.shape[1] <= 2 or x.shape[0] < 10:
+        return pca_to_2d(x)
+    try:
+        import umap  # type: ignore
+    except ImportError:
+        return pca_to_2d(x)
+    reducer = umap.UMAP(
+        n_components=2,
+        n_neighbors=min(15, max(2, x.shape[0] - 1)),
+        min_dist=0.1,
+        random_state=random_state,
+        # UMAP warns on tiny datasets; silence for our per-event render.
+        verbose=False,
+    )
+    try:
+        return reducer.fit_transform(x).astype(np.float32)
+    except Exception:
+        return pca_to_2d(x)
+
+
+def project_2d(x: np.ndarray, mode: str = "pca") -> np.ndarray:
+    """Dispatch 2D projection by string name ("pca" | "umap")."""
+    if mode == "umap":
+        return umap_to_2d(x)
+    return pca_to_2d(x)
+
+
 # ---------------------------------------------------------------------------
 # Label strip helpers (PIL text rendering over an RGB bar).
 # ---------------------------------------------------------------------------
@@ -103,9 +140,15 @@ class OCTask(Dataset, ABC):
     ``panel_hw`` is the default (height, width) the base class asks each
     ``plot_*`` method to produce. Subclasses may use it as a guideline or
     return a different-sized image (the grid composer pads to the max).
+
+    ``projection`` chooses how >2D cluster coordinates are reduced to 2D
+    for the OC panel: "pca" (fast, linear, stable axes across steps) or
+    "umap" (non-linear; better for separated clusters when cluster_dim is
+    large). With ``cluster_dim <= 2`` both modes are identity.
     """
 
     panel_hw: tuple[int, int] = (128, 128)
+    projection: str = "pca"
 
     # ----- data iteration -------------------------------------------------
 
@@ -205,7 +248,7 @@ class OCTask(Dataset, ABC):
         offsets = batch["offset"].detach().cpu().numpy().tolist()
         pred_np = pred_cluster.detach().cpu().numpy()
         beta_np = preds["beta"].detach().cpu().numpy()
-        oc_np = pca_to_2d(preds["x"].detach().cpu().numpy())
+        oc_raw = preds["x"].detach().cpu().numpy()
 
         rows, cols = grid
         n_wanted = rows * cols
@@ -216,10 +259,14 @@ class OCTask(Dataset, ABC):
         for i in range(n_events):
             s, e = starts[i], offsets[i]
             event = self._slice_event(batch, s, e, event_idx=i)
+            # Project cluster coords per event so each OC panel shows its
+            # own embedding structure (shared axes across events aren't
+            # meaningful once we consider non-linear modes like UMAP).
+            oc_xy_event = project_2d(oc_raw[s:e], mode=self.projection)
             cell = self.render_cell(
                 event,
                 pred_cluster=pred_np[s:e],
-                oc_xy=oc_np[s:e],
+                oc_xy=oc_xy_event,
                 beta=beta_np[s:e],
                 event_idx=i,
                 upscale=upscale,
