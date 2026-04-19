@@ -17,7 +17,7 @@ flowchart LR
     pt --> wh["width & height heads<br/>(MLP → R)"]
     beta --> oc{{"Object Condensation<br/>inference:<br/>β > t_β picks a<br/>condensation point;<br/>claim hits with ||x − x_c|| < t_d"}}
     x --> oc
-    oc --> out[("predicted clusters<br/>+ per-cluster<br/>shape/w/h"])
+    oc --> out[("predicted clusters<br/>+ per-cluster<br/>shape, width, height")]
 ```
 
 ## Blocks
