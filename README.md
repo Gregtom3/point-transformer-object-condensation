@@ -95,6 +95,7 @@ Inference: β > t_β ⟹ condensation point. Claim hits within ||x - x_c|| < t_d
 │   ├── train.py              # python scripts/train.py --config ...
 │   ├── evaluate.py           # aggregate metrics (purity / efficiency / MAE)
 │   ├── export_predictions.py # writes per-hit preds + provenance back to HDF5
+│   ├── ship_tb_run.py        # package a TB log dir + optionally upload to Slack
 │   ├── generate_data.py      # thin wrapper over data/generate_shapes.py
 │   └── export_onnx.py        # heads-only ONNX export (backbone stays in PyTorch)
 ├── tests/
@@ -264,6 +265,28 @@ python scripts/export_onnx.py --config configs/train/shapes.yaml \
 `scripts/train.py` writes `<log_dir>/architecture/architecture.md` on
 startup: Mermaid flowchart, per-module parameter counts, and a
 `torchinfo` layer table for the heads.
+
+### Sharing a run (Slack)
+
+To hand a live TensorBoard run off to a collaborator who'll view it on
+their own machine:
+
+```bash
+# package-only (writes /tmp/tb_run_<name>_<timestamp>.tar.gz)
+python scripts/ship_tb_run.py --run-dir runs/shapes
+
+# package + upload to a Slack channel or DM
+export SLACK_BOT_TOKEN=xoxb-...          # bot token with files:write + chat:write
+python scripts/ship_tb_run.py \
+    --run-dir runs/shapes \
+    --slack-channel C0123456789 \
+    --message "Shapes run, 50 epochs, purity 0.93"
+```
+
+The tarball contains the full run dir and an auto-generated
+`ABOUT.md` with extraction + `tensorboard --logdir ...` instructions
+so the recipient doesn't need any knowledge of this repo to view the
+run.
 
 ## Docs
 
