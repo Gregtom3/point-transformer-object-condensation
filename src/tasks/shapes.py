@@ -20,7 +20,6 @@ import torch
 from .base import (
     BG_COLOR,
     OCTask,
-    PALETTE,
     UNCLAIMED_COLOR,
     UNMATCHED_COLOR,
     match_pred_to_truth,
@@ -189,38 +188,63 @@ class ShapesTask(OCTask):
         colors: np.ndarray,
         mask: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Shared body for TRUTH and PRED: paint one color per hit."""
+        """Shared body for TRUTH and PRED: paint one color per hit, filling
+        a block whose size matches the source→panel scale factor so shapes
+        stay visually solid when the panel is larger than the source frame.
+        """
         canvas = self._blank_canvas(size_hw)
         xy_src, (fw, fh) = self._event_pixel_xy(event)
         if xy_src.shape[0] == 0:
             return canvas
         h, w = size_hw
-        xy = self._scale_xy(xy_src, (fw, fh), (w, h))
+        sx = w / max(1, fw)
+        sy = h / max(1, fh)
+        bw = max(1, int(np.ceil(sx)))
+        bh = max(1, int(np.ceil(sy)))
         if mask is None:
-            mask = np.ones(xy.shape[0], dtype=bool)
-        for (x, y), c, m in zip(xy, colors, mask):
+            mask = np.ones(xy_src.shape[0], dtype=bool)
+        for (x_s, y_s), c, m in zip(xy_src, colors, mask):
             if not m:
                 continue
-            cv2.rectangle(canvas, (int(x), int(y)), (int(x), int(y)),
+            px = int(x_s * sx)
+            py = int(y_s * sy)
+            x1 = min(w - 1, px + bw - 1)
+            y1 = min(h - 1, py + bh - 1)
+            cv2.rectangle(canvas, (px, py), (x1, y1),
                           tuple(int(v) for v in c), thickness=-1)
         return canvas
 
     # ----- plot_truth / plot_pred / plot_oc ------------------------------
 
+    def _feat_rgb(self, event: dict[str, Any]) -> np.ndarray:
+        feat = event["feat"].detach().cpu().numpy()
+        return (np.clip(feat, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+    def _truth_id_to_feat(self, event: dict[str, Any]) -> dict[int, np.ndarray]:
+        """Canonical RGB color per truth object, taken from that object's feat
+        (all hits of a single shape share the same feat, so one sample is fine)."""
+        truth = event["object_id"].detach().cpu().numpy()
+        rgb = self._feat_rgb(event)
+        out: dict[int, np.ndarray] = {}
+        for oid in np.unique(truth):
+            if oid <= 0:
+                continue
+            idxs = np.where(truth == oid)[0]
+            out[int(oid)] = rgb[idxs[0]]
+        return out
+
     def plot_truth(self, event: dict[str, Any],
                    size_hw: tuple[int, int]) -> np.ndarray:
         obj = event["object_id"].detach().cpu().numpy()
-        colors = np.zeros((obj.shape[0], 3), dtype=np.uint8)
+        colors = self._feat_rgb(event)  # each hit keeps its own feat color
         mask = obj > 0
-        if mask.any():
-            ids = obj[mask] % PALETTE.shape[0]
-            colors[mask] = PALETTE[ids]
         return self._paint_pixel_panel(event, size_hw, colors, mask)
 
     def plot_pred(self, event: dict[str, Any], pred_cluster: np.ndarray,
                   size_hw: tuple[int, int]) -> np.ndarray:
         truth = event["object_id"].detach().cpu().numpy()
         mapping = match_pred_to_truth(truth, pred_cluster)
+        id_to_color = self._truth_id_to_feat(event)
         n = pred_cluster.shape[0]
         colors = np.zeros((n, 3), dtype=np.uint8)
         mask = np.zeros(n, dtype=bool)
@@ -231,7 +255,10 @@ class ShapesTask(OCTask):
                 mask[i] = True
                 continue
             t = mapping.get(p, -1)
-            colors[i] = PALETTE[t % PALETTE.shape[0]] if t > 0 else UNMATCHED_COLOR
+            if t > 0 and t in id_to_color:
+                colors[i] = id_to_color[t]  # matched → original shape color
+            else:
+                colors[i] = UNMATCHED_COLOR  # medium gray: false positive
             mask[i] = True
         return self._paint_pixel_panel(event, size_hw, colors, mask)
 
