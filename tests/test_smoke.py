@@ -63,9 +63,17 @@ def test_oc_loss_tiger_finite():
 @needs_addict
 @needs_timm
 def test_ptv3_forward_smoke():
-    """PTv3 backbone runs forward on a ~500-point dummy batch (CPU OK)."""
+    """PTv3 backbone runs forward on a ~500-point dummy batch.
+
+    spconv's implicit-gemm sparse convolution is CUDA-only, so this test
+    is skipped on machines without a CUDA device.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("spconv's implicit-gemm kernel requires CUDA")
+
     from src.models.backbone import PTv3Backbone
 
+    device = torch.device("cuda")
     torch.manual_seed(0)
     in_ch = 8
     backbone = PTv3Backbone(
@@ -84,11 +92,11 @@ def test_ptv3_forward_smoke():
         enable_flash=False,
         shuffle_orders=False,
         grid_size=0.02,
-    )
+    ).to(device)
     n = 500
-    coord = torch.rand(n, 3)
-    feat = torch.randn(n, in_ch)
-    offset = torch.tensor([n], dtype=torch.long)
+    coord = torch.rand(n, 3, device=device)
+    feat = torch.randn(n, in_ch, device=device)
+    offset = torch.tensor([n], dtype=torch.long, device=device)
     data = {"coord": coord, "feat": feat, "offset": offset, "grid_size": 0.02}
 
     point = backbone(data)
