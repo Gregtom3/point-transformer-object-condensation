@@ -1,25 +1,32 @@
 """Training loop with TensorBoard instrumentation.
 
 The Trainer is minimal on purpose — it wires together backbone, heads,
-and the OC loss, plus TB logging for scalars, gradient norms, the
-learned cluster-coord embedding, and prediction-vs-truth canvas images.
+and the OC loss, plus TB logging for:
+    * per-step loss scalars + grad norm
+    * per-step beta histogram
+    * a 4x4 grid of fixed val events (truth / pred / beta panels) so
+      progress is visible by watching the same images evolve
+    * the cluster-coord projector on the same fixed events
+    * a one-shot markdown "readme" in the Text tab explaining every panel
 
-Training loop: one optimizer step per batch. Validation runs once per
-epoch. Checkpoints are dumped per epoch to ``ckpt_dir``.
+Validation runs once per epoch. Checkpoints are dumped per epoch to
+``ckpt_dir``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader, Dataset
 
 from src.inference.cluster import beta_threshold_cluster
 from src.utils.tb_logging import (
     log_oc_embedding,
-    log_prediction_canvas,
+    log_prediction_grid,
+    log_run_description,
     log_scalars,
 )
 
@@ -41,6 +48,8 @@ class TBConfig:
     embedding_every: int = 500
     inference_t_beta: float = 0.1
     inference_t_d: float = 0.4
+    viz_grid: tuple[int, int] = (4, 4)
+    viz_upscale: int = 3
 
 
 class Trainer:
@@ -52,6 +61,9 @@ class Trainer:
         config: TrainerConfig | None = None,
         tb_config: TBConfig | None = None,
         ckpt_dir: str | None = None,
+        viz_dataset: Dataset | None = None,
+        viz_collate=None,
+        config_dump: str = "",
     ) -> None:
         self.backbone = backbone
         self.heads = heads
@@ -69,6 +81,13 @@ class Trainer:
         self._step = 0
         self.writer = self._make_writer()
 
+        self._viz_batch = None
+        if viz_dataset is not None and viz_collate is not None:
+            self._viz_batch = self._build_viz_batch(viz_dataset, viz_collate)
+
+        if self.writer is not None:
+            log_run_description(self.writer, config_dump=config_dump)
+
     def _make_writer(self):
         try:
             from torch.utils.tensorboard import SummaryWriter
@@ -76,6 +95,12 @@ class Trainer:
         except Exception:
             print("WARN: tensorboard not available; scalars will be printed only")
             return None
+
+    def _build_viz_batch(self, dataset: Dataset, collate) -> dict[str, Any]:
+        rows, cols = self.tb_cfg.viz_grid
+        n_wanted = min(rows * cols, len(dataset))
+        items = [dataset[i] for i in range(n_wanted)]
+        return collate(items)
 
     # ---- per-step mechanics ------------------------------------------------
 
@@ -96,9 +121,7 @@ class Trainer:
         return preds, point
 
     def _loss(self, preds: dict, batch: dict) -> dict[str, torch.Tensor]:
-        targets = {
-            "object_id": batch["object_id"],
-        }
+        targets = {"object_id": batch["object_id"]}
         for k in ("shape_id_per_hit", "width_per_hit", "height_per_hit",
                   "energy_per_hit", "momentum_per_hit"):
             if k in batch and torch.is_tensor(batch[k]):
@@ -123,32 +146,62 @@ class Trainer:
                        if torch.is_tensor(v) and v.dim() == 0}
             scalars["grad_norm"] = float(grad_norm)
             log_scalars(self.writer, "train", scalars, self._step)
-            if self._step % self.tb_cfg.image_every == 0:
-                self._log_canvas(batch, preds, tag="train/canvas")
-            if self._step % self.tb_cfg.embedding_every == 0 and self._step > 0:
-                log_oc_embedding(
-                    self.writer, "train/oc_space",
-                    preds["x"], batch["object_id"], self._step,
-                )
             self.writer.add_histogram("train/beta", preds["beta"].detach(), self._step)
+
+            if self._step % self.tb_cfg.image_every == 0:
+                self._log_viz_grid()
+            if self._step % self.tb_cfg.embedding_every == 0 and self._step > 0:
+                self._log_viz_embedding()
+
         self._step += 1
         return losses
 
-    def _log_canvas(self, batch: dict, preds: dict, tag: str) -> None:
-        # split batch back into events via offset; log first event only
-        offset = batch["offset"].cpu().tolist()
-        end = offset[0]
-        coord = batch["coord"][:end]
-        object_id = batch["object_id"][:end]
-        x = preds["x"][:end]
-        beta = preds["beta"][:end]
-        pred_cluster = beta_threshold_cluster(
-            beta, x, t_beta=self.tb_cfg.inference_t_beta,
-            t_d=self.tb_cfg.inference_t_d,
+    # ---- fixed-viz-batch logging ------------------------------------------
+
+    @torch.no_grad()
+    def _viz_forward(self) -> tuple[dict, dict, torch.Tensor]:
+        assert self._viz_batch is not None
+        batch = self._to_device(self._viz_batch)
+        was_train = self.backbone.training
+        self.backbone.eval()
+        self.heads.eval()
+        preds, _ = self._forward(batch)
+        if was_train:
+            self.backbone.train()
+            self.heads.train()
+        cluster_ids = self._cluster_per_event(batch, preds)
+        return batch, preds, cluster_ids
+
+    def _cluster_per_event(self, batch: dict, preds: dict) -> torch.Tensor:
+        """Run OC inference clustering per event, concatenated."""
+        offsets = batch["offset"].cpu().tolist()
+        starts = [0] + offsets[:-1]
+        out = torch.zeros_like(batch["object_id"])
+        for s, e in zip(starts, offsets):
+            cl = beta_threshold_cluster(
+                preds["beta"][s:e], preds["x"][s:e],
+                t_beta=self.tb_cfg.inference_t_beta,
+                t_d=self.tb_cfg.inference_t_d,
+            )
+            out[s:e] = cl
+        return out
+
+    def _log_viz_grid(self) -> None:
+        if self._viz_batch is None:
+            return
+        batch, preds, cluster_ids = self._viz_forward()
+        log_prediction_grid(
+            self.writer, "viz/grid", batch, preds, cluster_ids, self._step,
+            grid=self.tb_cfg.viz_grid, upscale=self.tb_cfg.viz_upscale,
         )
-        frame = tuple(int(v) for v in batch["frame"][0].cpu().tolist())
-        log_prediction_canvas(
-            self.writer, tag, coord, object_id, pred_cluster, frame, self._step,
+
+    def _log_viz_embedding(self) -> None:
+        if self._viz_batch is None:
+            return
+        batch, preds, _ = self._viz_forward()
+        log_oc_embedding(
+            self.writer, "viz/oc_space",
+            preds["x"], batch["object_id"], self._step,
         )
 
     # ---- full loop ---------------------------------------------------------

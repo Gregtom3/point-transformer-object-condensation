@@ -79,6 +79,9 @@ def main() -> None:
             inference_t_d=cfg.inference.t_d,
         ),
         ckpt_dir=cfg.train.ckpt_dir,
+        viz_dataset=val_ds,
+        viz_collate=collate_shapes,
+        config_dump=OmegaConf.to_yaml(cfg),
     )
 
     if args.resume is not None:
