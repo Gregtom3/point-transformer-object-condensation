@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 from src.inference.cluster import beta_threshold_cluster
 from src.models.backbone import PTv3Backbone
 from src.models.heads import ObjectCondensationHeads
-from src.tasks import ShapesTask
+from src.tasks import ShapesTask, get_task_class  # noqa: F401
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,7 +83,9 @@ def main() -> None:
 
     root = Path(cfg.data.root)
     split_file = getattr(cfg.data, f"{args.split}_file")
-    task = ShapesTask(
+    task_name = getattr(cfg.data, "task_class", "ShapesTask")
+    TaskCls = get_task_class(task_name)
+    task = TaskCls(
         root / split_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,

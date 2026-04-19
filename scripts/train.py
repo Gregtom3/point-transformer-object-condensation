@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from src.losses.oc_loss import ObjectCondensationLoss
 from src.models.backbone import PTv3Backbone
 from src.models.heads import ObjectCondensationHeads
-from src.tasks import ShapesTask
+from src.tasks import ShapesTask, get_task_class  # noqa: F401
 from src.training.trainer import TBConfig, Trainer, TrainerConfig
 from src.utils.model_summary import count_params, write_architecture_report
 
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def _loader(task: ShapesTask, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
+def _loader(task, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
     return DataLoader(
         task,
         batch_size=batch_size,
@@ -49,13 +49,16 @@ def main() -> None:
 
     root = Path(cfg.data.root)
     oc_projection = getattr(getattr(cfg, "viz", object()), "oc_projection", "pca")
-    train_task = ShapesTask(
+    task_name = getattr(cfg.data, "task_class", "ShapesTask")
+    TaskCls = get_task_class(task_name)
+    print(f"task: {task_name}")
+    train_task = TaskCls(
         root / cfg.data.train_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
         projection=oc_projection,
     )
-    val_task = ShapesTask(
+    val_task = TaskCls(
         root / cfg.data.val_file,
         normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,

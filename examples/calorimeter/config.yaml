@@ -1,0 +1,73 @@
+# Runcard for the toy calorimeter task. A sibling of
+# configs/train/shapes.yaml — diff the two to see exactly which fields
+# change per-task.
+defaults:
+  - _self_
+
+data:
+  task_class: CalorimeterTask   # NEW — lets scripts/train.py pick the right task
+  root: data/calo_v1
+  train_file: train.h5
+  val_file: val.h5
+  test_file: test.h5
+  normalize_coords: true
+  max_hits: 0
+
+model:
+  backbone:
+    in_channels: 3              # (log10(E), t, subdet_id)  — matches CalorimeterTask feat width
+    enable_flash: false
+    enc_depths: [2, 2, 2, 2]
+    enc_channels: [32, 64, 128, 256]
+    enc_num_head: [2, 4, 8, 16]
+    enc_patch_size: [128, 128, 128, 128]
+    stride: [2, 2, 2]
+    dec_depths: [1, 1, 1]
+    dec_channels: [32, 64, 128]
+    dec_num_head: [2, 4, 8]
+    dec_patch_size: [128, 128, 128]
+    mlp_ratio: 2
+    drop_path: 0.0
+    shuffle_orders: true
+    grid_size: 0.01             # slightly coarser than shapes — sparser hits per event
+  heads:
+    cluster_dim: 2
+    hidden_dim: 128
+    n_pid_classes: 2            # dummy (no class target here); kept for head compatibility
+    predict_width_height: false # calorimeter uses energy regression instead
+    predict_energy: true
+    predict_momentum: false
+
+loss:
+  q_min: 1.0
+  noise_threshold: 0
+  max_n_rep: 0
+  payload_weight: 1.0
+  torch_compile: false
+  shape_id_weight: 0.0          # no class target in this task
+  width_weight: 0.0
+  height_weight: 0.0
+  energy_weight: 1.0            # per-hit energy regression (GeV)
+
+train:
+  batch_size: 2
+  num_workers: 0
+  seed: 0
+  log_dir: runs/calo
+  ckpt_dir: outputs/calo
+  save_every: 1
+  tb_image_every: 100
+  tb_embedding_every: 500
+  trainer:
+    max_epochs: 10
+    lr: 3.0e-4
+    weight_decay: 1.0e-4
+    grad_clip: 1.0
+    log_every: 20
+
+inference:
+  t_beta: 0.5
+  t_d: 0.28
+
+viz:
+  oc_projection: pca

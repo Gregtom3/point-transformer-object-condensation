@@ -1,431 +1,591 @@
-# Bringing your own data
+# Tutorial: plug your own data into the pipeline
 
-This guide walks through **slotting a new data format into the pipeline**
-end-to-end: from raw files to training, evaluation, ONNX export, and
-writing predictions back into your source data with full provenance. We
-use the [shapes pseudo-dataset](../data/generate_shapes.py) as a
-working reference the whole way through — every piece you need to write
-has an analog in `ShapesTask`.
+> [!NOTE]
+> Audience: first-year grad student / first-time contributor. If you've
+> never touched `torch.utils.data.Dataset` before, that's fine — this
+> tutorial walks through it end-to-end and tells you exactly what to type.
 
-> [!TIP]
-> Work top-down. The first thing the pipeline needs is a **Task**; most
-> of the other pieces fall out of it.
+You have some data. You want to train the PTv3 + Object Condensation
+model on it, watch it converge in TensorBoard, evaluate, and save
+predictions back next to your inputs. This guide shows you how,
+using a **toy "left / right calorimeter" detector** as a worked example
+(runnable code lives in [`examples/calorimeter/`](../examples/calorimeter/)).
 
-## A concrete scenario
-
-You have your own data. For the rest of this guide we'll assume:
-
-* It lives on disk in some format of your choosing (HDF5 / ROOT / Parquet / numpy / ...).
-* Each "event" is a set of points with features — positions, feature
-  vectors, and a per-point label that says which object they belong
-  to. 0 means noise / background.
-* You want to predict per-object things (a class label, maybe a
-  regression target like a size or an energy).
-* You want to train a model, evaluate it, and end up with **a copy of
-  your data that has the predicted features appended**, tagged with the
-  checkpoint / config / timestamp that produced them.
-
-Here's the shortest possible map from that scenario to this repo:
-
-| You need ... | You write ... | Reference |
-|---|---|---|
-| The pipeline to read your data | A `MyTask(OCTask)` subclass | [`src/tasks/shapes.py`](../src/tasks/shapes.py) |
-| A config (runcard) | A YAML in `configs/train/` | [`configs/train/shapes.yaml`](../configs/train/shapes.yaml) |
-| Entry points | `scripts/train.py`, `scripts/evaluate.py` already work — they just need to import your task | [`scripts/train.py`](../scripts/train.py) |
-| Train-time noise / rotations | A `MyAug(Augmentation)` subclass | [`src/augmentations/`](../src/augmentations/) |
-| Predictions written back to HDF5 | `scripts/export_predictions.py` | [`scripts/export_predictions.py`](../scripts/export_predictions.py) |
+At the end you'll have done every piece you need to do for your real
+data — just with different file formats and different physics.
 
 ---
 
-## Step 1: write your task class
+## The 30-second mental model
+
+The pipeline has three moving parts that are yours:
+
+```
+┌──────────┐     ┌───────────┐     ┌──────────┐
+│   your   │     │   your    │     │   your   │
+│   data   │ ──▶ │   Task    │ ──▶ │  runcard │
+│ on disk  │     │   class   │     │  (yaml)  │
+└──────────┘     └───────────┘     └──────────┘
+                       │                │
+                       ▼                ▼
+                 everything else runs unchanged:
+                 backbone, OC heads, loss, trainer,
+                 TensorBoard logging, evaluation, ONNX export
+```
+
+The **Task class** is the contract. Once it's written, the rest of the
+repo stops caring what your data looks like.
+
+---
+
+## The checklist
+
+Copy this into a scratch file and tick items as you go. If a step feels
+stuck, read the linked section.
+
+- [ ] **0.** Decide the shape of one event: how many per-hit tensors do
+  you have, and which one is the truth clustering?
+  ([→ Step 0](#step-0-pin-down-what-one-event-looks-like))
+- [ ] **1.** Put your data on disk in a format you can read per-event.
+  HDF5 is the path of least resistance in this repo.
+  ([→ Step 1](#step-1-put-your-data-somewhere-you-can-read-it))
+- [ ] **2.** Write a `Task` class that subclasses `OCTask`.
+  Implement: `__len__`, `__getitem__`, `__repr__`, `collate`,
+  `plot_truth`, `plot_pred`, `plot_oc`.
+  ([→ Step 2](#step-2-write-the-task-class))
+- [ ] **3.** Register the task name in `src/tasks/__init__.py`.
+  ([→ Step 3](#step-3-register-the-task))
+- [ ] **4.** Write a runcard YAML — copy an existing one and edit.
+  ([→ Step 4](#step-4-write-the-runcard))
+- [ ] **5.** Smoke-test it before training: does `task[0]` return a dict?
+  Does `task.collate([task[0], task[1]])` work? Does
+  `task.render_grid(...)` produce a non-blank image?
+  ([→ Step 5](#step-5-smoke-test-before-training))
+- [ ] **6.** Train. Watch TensorBoard. If the loss explodes, read
+  [troubleshooting](#troubleshooting).
+- [ ] **7.** Evaluate + export predictions back to your data with full
+  provenance.
+  ([→ Step 7](#step-7-evaluate-and-export-predictions))
+- [ ] **8.** (optional) ONNX-export the heads.
+
+---
+
+## The running example: left/right calorimeter
+
+> [!TIP]
+> The complete, runnable implementation is at
+> [`examples/calorimeter/`](../examples/calorimeter/). Try it:
+> `python examples/calorimeter/generate.py --out data/calo_v1` then
+> `python scripts/train.py --config examples/calorimeter/config.yaml`.
+
+**The physics (one paragraph).** Imagine two flat calorimeter walls, one
+at `x = -50 cm`, one at `x = +50 cm`. A particle originating near the
+origin can fly outward and hit either wall. When it does, its energy
+doesn't go into a single cell — it spreads over a small cluster ("a
+shower") of nearby cells. Our dataset has many events; each event has a
+few particles; each particle produced maybe 6–14 cells of energy. We
+want the model to:
+
+1. cluster cells back into their source particle (**OC**), and
+2. predict each particle's total energy from its cells
+   (**per-hit regression**).
+
+**In OC terms:**
+
+| OC concept | calorimeter concept |
+|---|---|
+| A hit | A calorimeter cell with nonzero energy deposit |
+| `coord` | Cell's 3D position `(x, y, z)` in cm |
+| `feat` | `(log10(E_cell), arrival_time, subdet_id)` — `subdet_id` is 0 for left, 1 for right |
+| `object_id` | Unique ID of the particle that produced this cell |
+| `noise` | Zero cells (never emitted, so there are none) |
+| Payload target | `energy_per_hit` — total particle energy, broadcast per cell |
+
+---
+
+## Step 0: pin down what one event looks like
+
+> [!IMPORTANT]
+> Before you write any code, write two or three sentences describing
+> your data in the table above. What's one hit? What are its features?
+> What is the truth clustering called? What (if anything) are you
+> regressing or classifying per-object?
+
+If you can't fill that table in yet, you don't know your data well
+enough to train a model on it. Go read your detector's docs, open one
+event in a notebook, whatever it takes.
+
+For the calorimeter, the table above is all we need.
+
+---
+
+## Step 1: put your data somewhere you can read it
+
+The pipeline expects **one event per group in HDF5**, and that's the
+path we recommend for new tasks — it's what `ShapesTask` and
+`CalorimeterTask` both use. The advantage: your `__getitem__` is three
+lines, and `scripts/export_predictions.py` can write results back into
+the same file.
+
+Target layout:
+
+```
+data/your_task_v1/
+├── train.h5
+│   └── meta/                     # attributes describing the split
+│   └── event_000000/
+│       ├── coord          (N, 3)  float32
+│       ├── feat           (N, F)  float32
+│       ├── object_id      (N,)    int64   # 0 = noise; globally unique across events
+│       └── <your payload targets>
+│   └── event_000001/
+│   └── ...
+├── val.h5
+└── test.h5
+```
+
+> [!IMPORTANT]
+> **`object_id` must be globally unique across every event in a
+> split**. If event 0 has particles 1, 2, 3, then event 1's particles
+> start at 4, not back at 1. The OC loss relies on this. See
+> `data/generate_shapes.py` or `examples/calorimeter/generate.py` for
+> how both generators keep a running counter.
+
+If your data isn't in HDF5 yet, **write a generator script once** and
+be done with it. The calorimeter generator is ~150 lines of
+straightforward numpy:
+
+```bash
+# look at the reference implementation
+less examples/calorimeter/generate.py
+
+# run it
+python examples/calorimeter/generate.py --out data/calo_v1 \
+    --n-train 400 --n-val 50 --n-test 50 --seed 0
+```
+
+After it runs:
+
+```
+data/calo_v1/
+├── train.h5        (400 events)
+├── val.h5          (50 events)
+├── test.h5         (50 events)
+└── metadata.json   (counts, config, paths)
+```
+
+---
+
+## Step 2: write the Task class
 
 > [!NOTE]
-> **What this step does:** teaches the pipeline how to read your data
-> and how to visualize one event's truth / prediction / OC-space panel.
+> Every concept in this section has a working example in
+> [`examples/calorimeter/task.py`](../examples/calorimeter/task.py).
+> Read it alongside this walkthrough — it's ~250 lines of
+> mostly-boilerplate.
 
-An [`OCTask`](../src/tasks/base.py) is a `torch.utils.data.Dataset` with
-six extra methods. Subclass it and fill in the abstract methods. The
-full contract and method-by-method breakdown is in
-[`src/tasks/README.md`](../src/tasks/README.md); here we sketch the
-skeleton.
+Your task is a single class that subclasses `OCTask`. The class lives
+wherever is convenient (`src/tasks/your_task.py`, or
+`examples/your_task/task.py` while iterating).
+
+### 2a. Data methods
 
 ```python
-# src/tasks/mytask.py
-from __future__ import annotations
+from src.tasks.base import OCTask
 
-import h5py  # or whatever you need
-import numpy as np
-import torch
-
-from src.augmentations.base import Augmentation
-from .base import OCTask, UNCLAIMED_COLOR, UNMATCHED_COLOR, match_pred_to_truth
-
-
-class MyTask(OCTask):
-    def __init__(self, path, augmentation: Augmentation | None = None, ...) -> None:
-        self.path = path
+class CalorimeterTask(OCTask):
+    def __init__(self, path, normalize_coords=True, max_hits=0,
+                 panel_hw=(192, 192), projection="pca", augmentation=None):
+        self.path = Path(path)
+        self.normalize_coords = normalize_coords
+        self.max_hits = max_hits
+        self.panel_hw = panel_hw
+        self.projection = projection
         self.augmentation = augmentation
-        # open source, cache per-event offsets, etc.
+        # Read whatever you need from meta ONCE in __init__ — DataLoader
+        # workers will copy this object to each process.
+        with h5py.File(self.path, "r") as f:
+            self.n_events = int(f["meta"].attrs["n_events"])
+            self.wall_x = float(f["meta"].attrs["wall_x"])
+            self.frame = tuple(int(x) for x in f["meta"].attrs["frame"])
+        self._h5 = None  # lazy-open in worker: see _file() below
 
-    # --- data -----------------------------------------------------------
+    def _file(self):
+        # Lazily open the HDF5 file. This matters for multi-worker
+        # DataLoaders: each worker needs its own file handle.
+        if self._h5 is None:
+            self._h5 = h5py.File(self.path, "r", swmr=True)
+        return self._h5
 
-    def __len__(self) -> int:
+    def __len__(self):
         return self.n_events
 
-    def __getitem__(self, idx: int) -> dict:
-        # Required keys on return:
-        #   coord:     float32 (N, 3)   — positions (2D tasks leave z=0)
-        #   feat:      float32 (N, F)   — per-hit features
-        #   object_id: int64   (N,)     — truth id (0 = noise); globally unique
-        # Optional per-hit payload targets:
-        #   shape_id_per_hit, width_per_hit, height_per_hit, energy_per_hit, momentum_per_hit
+    def __repr__(self):
+        return f"CalorimeterTask(path={self.path}, n_events={self.n_events})"
+
+    def __getitem__(self, idx):
+        g = self._file()[f"event_{idx:06d}"]
+        coord = np.asarray(g["coord"])
+        feat = np.asarray(g["feat"])
+        object_id = np.asarray(g["object_id"])
+        energy = np.asarray(g["energy_per_hit"])
+
+        if self.normalize_coords:
+            # Whatever normalization puts coord into [0, 1]. PTv3's sparse
+            # voxelizer wants a bounded positive-quadrant grid.
+            coord = coord.copy()
+            coord[:, 0] = (coord[:, 0] + self.wall_x) / (2 * self.wall_x)
+            coord[:, 1] = (coord[:, 1] + 40) / 80.0
+            coord[:, 2] = (coord[:, 2] + 40) / 80.0
+
         event = {
-            "coord": torch.as_tensor(..., dtype=torch.float32),
-            "feat": torch.as_tensor(..., dtype=torch.float32),
-            "object_id": torch.as_tensor(..., dtype=torch.long),
-            # ... your payload targets ...
+            "coord":          torch.from_numpy(coord).float(),          # (N, 3)
+            "feat":           torch.from_numpy(feat).float(),           # (N, F)
+            "object_id":      torch.from_numpy(object_id).long(),       # (N,)
+            "energy_per_hit": torch.from_numpy(energy).float(),         # (N,)
+            "frame":          torch.tensor(self.frame, dtype=torch.long),
         }
         if self.augmentation is not None:
             event = self.augmentation(event)
         return event
-
-    def __repr__(self) -> str:
-        return f"MyTask(path={self.path}, n_events={self.n_events})"
-
-    def collate(self, batch: list[dict]) -> dict:
-        # Flatten along the hit axis and emit PTv3's offset layout.
-        # See ShapesTask.collate for the canonical pattern.
-        ...
-
-    # --- rendering -----------------------------------------------------
-
-    def plot_truth(self, event, size_hw):  ...
-    def plot_pred(self, event, pred_cluster, size_hw):  ...
-    def plot_oc(self, event, oc_xy, beta, size_hw):  ...
-```
-
-### Per-hit alignment rule
-
-Every per-hit tensor in `event` must share the same first dimension
-`N`. If you drop/filter hits in `__getitem__`, drop them from every
-per-hit tensor. The collate function relies on this.
-
-### What the three panels mean
-
-The base class composes a `(TRUTH | PRED | OC)` cell per event and tiles
-them into the TensorBoard grid. Each method returns an `(H, W, 3)` uint8
-RGB array. Key conventions:
-
-| Panel | What it shows | Coloring |
-|---|---|---|
-| TRUTH | Ground-truth clustering. | Shapes task colors each hit by its input `feat` so the panel reproduces the source image. Any scheme you like is fine as long as it's deterministic. |
-| PRED | Predicted clusters after OC inference. | **Match colors to TRUTH** — use `match_pred_to_truth()` and paint matched clusters the same color as their truth counterpart. Use `UNCLAIMED_COLOR` (light gray) for cluster_id ≤ 0 and `UNMATCHED_COLOR` (medium gray) for false positives. |
-| OC | Scatter of `oc_xy` (already 2D-reduced). | Show condensation structure. Shapes task colors by `feat` and alpha-blends by β (high β = opaque). |
-
-See [`src/tasks/shapes.py`](../src/tasks/shapes.py) for a reference.
-
-### Register your task
-
-```python
-# src/tasks/__init__.py
-from .shapes import ShapesTask  # noqa: F401
-from .mytask import MyTask      # noqa: F401
-```
-
----
-
-## Step 2: write a runcard
-
-> [!NOTE]
-> **What this step does:** tells the trainer how to build your
-> backbone, heads, loss, task, and TB logging for one run.
-
-Copy `configs/train/shapes.yaml` and edit it in place. The schema:
-
-```yaml
-data:
-  root: path/to/your/data       # task-specific; MyTask reads from here
-  train_file: train.h5          # or whatever your task needs
-  val_file: val.h5
-  test_file: test.h5
-  normalize_coords: true
-  max_hits: 0                   # 0 = no cap
-
-model:
-  backbone:
-    in_channels: <F>            # match MyTask.feat's last dim
-    enable_flash: false
-    enc_depths: [2, 2, 2, 2]
-    enc_channels: [32, 64, 128, 256]
-    # ... (see configs/model/ptv3_base.yaml for all knobs)
-  heads:
-    cluster_dim: 2              # 2 = directly plottable
-    hidden_dim: 128
-    n_pid_classes: <C>          # number of per-object classes you predict
-    predict_width_height: true  # set false if you don't need the regressor
-
-loss:
-  q_min: 1.0
-  noise_threshold: 0
-  payload_weight: 1.0
-  shape_id_weight: 1.0          # cross-entropy weight on shape_id_per_hit
-  width_weight: 1.0             # MSE weight on width_per_hit (normalized)
-  height_weight: 1.0
-
-train:
-  batch_size: 2
-  num_workers: 0
-  log_dir: runs/mytask
-  ckpt_dir: outputs/mytask
-  tb_image_every: 200
-  tb_embedding_every: 500
-  trainer:
-    max_epochs: 10
-    lr: 3.0e-4
-    weight_decay: 1.0e-4
-    grad_clip: 1.0
-    log_every: 20
-
-inference:
-  t_beta: 0.5                   # OC paper defaults
-  t_d: 0.28
-
-viz:
-  oc_projection: pca            # pca | umap (applies when cluster_dim > 2)
 ```
 
 > [!IMPORTANT]
-> **`in_channels` must match your `feat` width.** If your `feat` has
-> 8 channels, `model.backbone.in_channels: 8`. Mismatches surface as a
-> cryptic shape error on the first forward pass.
+> **Every per-hit tensor must share the same first dimension `N`.** If
+> you drop a row anywhere, drop it from every per-hit tensor. The
+> collate step concatenates them and assumes they're aligned.
 
----
+### 2b. Collate
 
-## Step 3: wire your task into train / eval
-
-The existing entrypoints already do everything you need — you just need
-to import your task instead of (or alongside) `ShapesTask`. The
-simplest change:
-
-```python
-# scripts/train.py
-# replace or add:
-from src.tasks import MyTask as TaskCls
-# ...
-train_task = TaskCls(root / cfg.data.train_file, ...)
-val_task   = TaskCls(root / cfg.data.val_file, ...)
-```
-
-If you want to keep both working, dispatch on a config field:
-
-```yaml
-# configs/train/mytask.yaml
-data:
-  task_class: MyTask            # or ShapesTask
-  root: ...
-```
+`collate` takes a list of event dicts and emits the flat-batched layout
+that PTv3 expects. It's almost always the same boilerplate — copy it
+from `ShapesTask.collate` or `CalorimeterTask.collate` and edit the
+`keys_flat` list.
 
 ```python
-TASK_REGISTRY = {"ShapesTask": ShapesTask, "MyTask": MyTask}
-TaskCls = TASK_REGISTRY[cfg.data.task_class]
+def collate(self, batch):
+    keys_flat = ["coord", "feat", "object_id", "energy_per_hit"]
+    out = {k: [] for k in keys_flat}
+    sizes, frames = [], []
+    for item in batch:
+        for k in keys_flat:
+            out[k].append(item[k])
+        sizes.append(item["coord"].shape[0])
+        frames.append(item["frame"])
+    for k in keys_flat:
+        out[k] = torch.cat(out[k], dim=0)
+    out["offset"] = torch.cumsum(torch.tensor(sizes, dtype=torch.long), dim=0)
+    out["frame"] = torch.stack(frames, dim=0)
+    out["batch_size"] = len(batch)
+    return out
 ```
-
-Then:
-
-```bash
-python scripts/train.py --config configs/train/mytask.yaml
-```
-
-The trainer opens TensorBoard under `<log_dir>`:
-
-* `train/loss/*` and `val/loss/*` — objective components (see
-  [`src/utils/tb_logging.py`](../src/utils/tb_logging.py) for the list).
-* `train/grad_norm` — clipped L2 gradient.
-* `viz/grid` — fixed set of val events, refreshed every `tb_image_every`
-  steps, using your task's `plot_*` methods.
-* `viz/oc_space` — TB Projector scatter of raw `x` cluster coordinates.
-* Text tab — a run README describing every panel, regenerated per run.
-
----
-
-## Step 4: (optional) augmentations
 
 > [!NOTE]
-> **What this step does:** adds train-time noise so the model doesn't
-> overfit to pixel-perfect inputs.
+> `offset` is PTv3's "cumulative hit count per event in this batch". The
+> backbone reads it to know where one event ends and the next begins.
+> You don't need to understand the internals — just emit it.
 
-Augmentations are callables with the signature
+### 2c. The three plot methods
+
+These methods each take an event (dict) and a target `(H, W)` size and
+return an `(H, W, 3)` uint8 RGB image. The base class composes them
+into a grid cell with TRUTH / PRED / OC labels.
+
+**`plot_truth(event, size_hw)`** — how do you want to visualize the
+ground-truth clustering? For the calorimeter, we show the two walls
+side-by-side as (y, z) scatter panels, color each hit by its
+`object_id`:
 
 ```python
-def __call__(self, event: dict) -> dict: ...
+def plot_truth(self, event, size_hw):
+    obj = event["object_id"].cpu().numpy()
+    id_to_color = self._id_palette(obj)   # small helper: id -> stable RGB
+    colors = np.zeros((obj.shape[0], 3), dtype=np.uint8)
+    for i, o in enumerate(obj):
+        if o > 0:
+            colors[i] = id_to_color[int(o)]
+    return self._paint_detector_panel(event, colors, mask=(obj > 0))
 ```
 
-Everything else is in [`src/augmentations/README.md`](../src/augmentations/README.md).
-The reference augmentations in [`src/augmentations/basic.py`](../src/augmentations/basic.py) are a template you can copy:
+**`plot_pred(event, pred_cluster, size_hw)`** — same layout, but use
+**matched colors** (each predicted cluster colored the same as its
+best-overlapping truth cluster). The base class gives you
+`match_pred_to_truth` to do the assignment:
 
 ```python
-from src.augmentations import Compose, RandomRotation2D, RandomColorJitter, RandomHitDropout
+from src.tasks.base import match_pred_to_truth, UNCLAIMED_COLOR, UNMATCHED_COLOR
 
-aug = Compose([
-    RandomRotation2D(max_angle_deg=15),
-    RandomColorJitter(sigma=0.02),
-    RandomHitDropout(p=0.1),
-])
-
-train_task = MyTask(..., augmentation=aug)
-val_task   = MyTask(...)  # augmentation=None is the default
+def plot_pred(self, event, pred_cluster, size_hw):
+    truth = event["object_id"].cpu().numpy()
+    id_to_color = self._id_palette(truth)
+    mapping = match_pred_to_truth(truth, pred_cluster)  # {pred_id: truth_id or -1}
+    colors = np.zeros((len(pred_cluster), 3), dtype=np.uint8)
+    mask = np.ones(len(pred_cluster), dtype=bool)
+    for i, p in enumerate(pred_cluster):
+        p = int(p)
+        if p <= 0:
+            colors[i] = UNCLAIMED_COLOR      # light gray: OC dropped this hit
+        else:
+            t = mapping.get(p, -1)
+            colors[i] = id_to_color[t] if t > 0 else UNMATCHED_COLOR
+    return self._paint_detector_panel(event, colors, mask)
 ```
+
+**`plot_oc(event, oc_xy, beta, size_hw)`** — scatter of the learned
+cluster coordinates. `oc_xy` has already been reduced to 2D (via PCA or
+UMAP, per `viz.oc_projection`). Color by truth id, alpha by β so
+high-β points are opaque and low-β points fade. The pattern:
+
+```python
+def plot_oc(self, event, oc_xy, beta, size_hw):
+    # normalize oc_xy into [margin, size - margin], draw cv2.circle per point
+    # with alpha = beta, color = id_to_color[truth_id]
+    # see examples/calorimeter/task.py for the full implementation
+    ...
+```
+
+You can copy that method from the calorimeter example verbatim if your
+task looks similar.
+
+> [!TIP]
+> You don't need to write these panels from scratch. For 2D image-like
+> tasks, copy from `ShapesTask`. For 3D scatter-like tasks, copy from
+> `CalorimeterTask`. The patterns generalize.
+
+---
+
+## Step 3: register the task
+
+Add your class to `src/tasks/__init__.py` so the runcard can name it:
+
+```python
+# src/tasks/__init__.py
+from .your_task import YourTask  # noqa: F401
+
+TASK_REGISTRY = {
+    "ShapesTask": ShapesTask,
+    "CalorimeterTask": _load_calorimeter_task,
+    "YourTask": YourTask,          # ← add this line
+}
+```
+
+`get_task_class("YourTask")` now returns your class. `scripts/train.py`,
+`scripts/evaluate.py`, and `scripts/export_predictions.py` call this
+function — you don't edit those scripts.
+
+---
+
+## Step 4: write the runcard
+
+Copy [`configs/train/shapes.yaml`](../configs/train/shapes.yaml) or
+[`examples/calorimeter/config.yaml`](../examples/calorimeter/config.yaml)
+to `configs/train/your_task.yaml` and edit. The fields you'll almost
+certainly change:
+
+| Field | Set it to |
+|---|---|
+| `data.task_class` | `"YourTask"` (the name you registered in Step 3) |
+| `data.root` | Path to the directory that has `train.h5` / `val.h5` / `test.h5` |
+| `model.backbone.in_channels` | The width `F` of your `feat` tensor |
+| `model.heads.n_pid_classes` | Number of per-object classes if you have a classification target; 2 if unused |
+| `model.heads.predict_width_height` | `false` if you don't have width/height targets |
+| `model.heads.predict_energy` | `true` if you have `energy_per_hit` |
+| `loss.*_weight` | Per-head weight; start at 1.0 and adjust after seeing loss magnitudes |
+| `train.log_dir` / `train.ckpt_dir` | `runs/your_task`, `outputs/your_task` |
 
 > [!WARNING]
-> Keep augmentations off for val / test. The trainer's viz panels
-> pull from val, and a noisy val set makes TB loss curves wobble for
-> the wrong reason.
+> **`in_channels` must match `feat` width exactly.** If `feat` has 3
+> columns, set `in_channels: 3`. Mismatches surface as a cryptic shape
+> error on the first forward pass. Open `examples/calorimeter/task.py`
+> and `config.yaml` side by side to see this constraint honored.
 
 ---
 
-## Step 5: evaluate
+## Step 5: smoke-test before training
 
-`scripts/evaluate.py` runs OC inference over a split and prints /
-dumps aggregate metrics (purity, efficiency, shape accuracy, width /
-height MAE). It already uses the task's `collate`, so if Step 3 hooked
-your task in, eval just works:
+Training runs are slow to fail. Catch bugs in 10 seconds instead:
 
-```bash
-python scripts/evaluate.py --config configs/train/mytask.yaml \
-    --checkpoint outputs/mytask/epoch_009.pt --split test
+```python
+# scratch.py — run with python scratch.py
+import torch
+from src.tasks import get_task_class
+
+TaskCls = get_task_class("CalorimeterTask")  # or YourTask
+task = TaskCls("data/calo_v1/train.h5")
+
+# (a) one event parses
+ev = task[0]
+for k, v in ev.items():
+    if torch.is_tensor(v):
+        print(f"  {k}: {tuple(v.shape)}  {v.dtype}")
+
+# (b) per-hit tensors are aligned
+Ns = {k: v.shape[0] for k, v in ev.items()
+      if torch.is_tensor(v) and v.dim() >= 1 and k not in ("frame",)}
+assert len(set(Ns.values())) == 1, f"per-hit N mismatch: {Ns}"
+
+# (c) collate produces PTv3's flat layout
+batch = task.collate([task[i] for i in range(4)])
+assert batch["coord"].shape[0] == batch["offset"][-1]
+
+# (d) the grid renders
+fake_preds = {
+    "beta": torch.rand(batch["coord"].shape[0]),
+    "x": torch.randn(batch["coord"].shape[0], 2),
+}
+fake_cluster = torch.zeros(batch["coord"].shape[0], dtype=torch.long)
+img = task.render_grid(batch, fake_preds, fake_cluster, grid=(2, 2), upscale=2)
+print(f"grid image: {img.shape}  dtype={img.dtype}  (expect CHW uint8)")
 ```
 
-Output is a JSON dumped to `args.out` (default
-`outputs/mytask/eval.json`).
-
-To add your own metrics, edit `scripts/evaluate.py` — it's intentionally
-small and reads straight. Aggregate over events in the main loop, add
-the new field to the final JSON dict.
+If any of those assertions fail, fix them before you start training —
+they'd just fail *inside* training with noisier error messages.
 
 ---
 
-## Step 6: append predictions back into your data
+## Step 6: train and watch TensorBoard
 
-> [!NOTE]
-> **What this step does:** runs inference over a split and writes
-> per-hit predictions + run metadata back into the source HDF5 file
-> so later analyses can load them without re-running the model.
+```bash
+python scripts/train.py --config configs/train/your_task.yaml
+```
 
-The reference script is
-[`scripts/export_predictions.py`](../scripts/export_predictions.py).
-Run it:
+Then in another terminal:
+
+```bash
+tensorboard --logdir runs/your_task
+```
+
+What to look at, in order:
+
+1. **Scalars → `train/loss/*`** — every loss component should be the
+   same order of magnitude (typically O(0.1) to O(10)). If one is 100×
+   bigger than the others, your weight / target normalization is off.
+   See [troubleshooting](#troubleshooting).
+2. **Scalars → `train/grad_norm`** — stays O(1). Spikes mean an
+   exploding gradient.
+3. **Images → `viz/grid`** — side-by-side TRUTH / PRED / OC panels on a
+   fixed set of val events. Watch them evolve. The first few steps
+   will show random PRED; a well-wired model starts recovering shape
+   outlines within a few hundred steps.
+4. **Text tab** — a human-readable run overview with the exact config
+   dumped verbatim.
+
+Checkpoints land in `outputs/your_task/epoch_*.pt` per epoch.
+
+---
+
+## Step 7: evaluate and export predictions
+
+**Aggregate metrics** (purity, efficiency, MAE, ...):
+
+```bash
+python scripts/evaluate.py --config configs/train/your_task.yaml \
+    --checkpoint outputs/your_task/epoch_009.pt --split test
+# prints JSON to stdout and writes outputs/your_task/eval.json
+```
+
+**Write per-hit predictions back into the HDF5** with full provenance
+(checkpoint path, config YAML verbatim, UTC timestamp, git SHA,
+hostname, thresholds):
 
 ```bash
 python scripts/export_predictions.py \
-    --config configs/train/mytask.yaml \
-    --checkpoint outputs/mytask/epoch_009.pt \
+    --config configs/train/your_task.yaml \
+    --checkpoint outputs/your_task/epoch_009.pt \
     --split test \
-    --output-group predictions_v1 \
-    [--overwrite]
+    --output-group predictions_v1
 ```
 
-What it writes (per event):
+After that runs, every event in the file has a new subgroup:
 
 ```
 event_000000/
-├── coord, feat, object_id, ...     # your original data, untouched
-└── predictions_v1/                 # new group
-    ├── beta         (N,)  float32
-    ├── cluster_id   (N,)  int64
-    ├── pid_pred     (N,)  int64
-    ├── width_pred   (N,)  float32
-    ├── height_pred  (N,)  float32
-    ├── x_cluster    (N, cluster_dim)  float32
-    └── .attrs: t_beta, t_d
+├── coord, feat, object_id, ...      # untouched inputs
+└── predictions_v1/
+    ├── beta         (N,)   float32
+    ├── cluster_id   (N,)   int64
+    ├── x_cluster    (N, 2) float32
+    ├── pid_pred     (N,)   int64    # if your task predicts class
+    ├── energy_pred  (N,)   float32  # if your task predicts energy
+    └── width_pred / height_pred     # if your task predicts those
 ```
 
 And at the file root:
 
 ```
 predictions_meta/predictions_v1/.attrs:
-    checkpoint:    absolute path of the .pt used
-    config_path:   absolute path of the YAML used
-    config_yaml:   entire runcard, verbatim
-    timestamp_utc: ISO 8601 timestamp
-    git_sha:       `git rev-parse HEAD` at export time
-    hostname:      machine that ran it
-    t_beta, t_d:   inference thresholds
-    split:         train / val / test
+    checkpoint:    .../epoch_009.pt
+    config_yaml:   <full yaml>
+    timestamp_utc: 2026-04-19T15:04:05+00:00
+    git_sha:       abc123...
+    hostname:      yourbox.lab.example.com
+    t_beta: 0.5
+    t_d: 0.28
+    split: test
+    fields_written: [beta, cluster_id, ...]
 ```
+
+Two months from now you'll be able to open the HDF5 and answer "which
+model produced these numbers?" without guessing.
 
 > [!TIP]
-> The `--output-group` flag lets you keep side-by-side runs in the same
-> file: `predictions_v1`, `predictions_ablation_noise`, etc. Pick a
-> descriptive name; future-you will thank you.
-
-**Adapting the keys you write.** The script hardcodes five per-hit
-fields because that's what the shapes heads produce. To write different
-keys (e.g. your `energy_pred`, your `subdet_id_pred`), edit
-`_write_predictions` — the function is ~20 lines and clearly marks
-what's arbitrary.
+> Pick a descriptive `--output-group` name per run (e.g.
+> `predictions_v1`, `predictions_noisier_aug`, `predictions_epoch50`).
+> The script errors if you'd overwrite an existing group unless you
+> also pass `--overwrite`.
 
 ---
 
-## Step 7: ONNX export
+## Troubleshooting
 
-`scripts/export_onnx.py` exports **the OC heads only**. The PTv3
-backbone uses sparse-conv ops (spconv) that don't trace cleanly to
-ONNX; keeping it in PyTorch while exporting just the heads is the
-pragmatic split: feature extraction stays flexible, the "what does
-this hit predict?" part is a clean dense MLP that onnx-runtimes can
-consume.
+### One loss term dominates `train/loss/total`
 
-```bash
-python scripts/export_onnx.py --config configs/train/mytask.yaml \
-    --checkpoint outputs/mytask/epoch_009.pt \
-    --out outputs/mytask/heads.onnx
-```
+Your targets aren't in the same numeric range as everything else.
+Example: if `energy_per_hit` is in GeV with values ~5.0, MSE at init
+is ~25 per hit while the OC terms are O(1). Fix: normalize the target
+in `__getitem__` (divide by a reasonable scale), then report back in
+the original units in your evaluator.
 
-If you need the backbone in ONNX too: the honest answer is "export the
-backbone separately with a custom op registration for spconv, or swap
-it for a dense backbone". The repo doesn't solve that for you; the
-heads export is what's tractable out of the box.
+### `RuntimeError: mat1 and mat2 shapes cannot be multiplied`
 
----
+Almost always `model.backbone.in_channels` in your runcard disagreeing
+with the last dimension of `feat` in your `__getitem__`. Open the
+runcard and the task side-by-side.
 
-## Cheatsheet
+### `viz/grid` panel is blank / one solid color
 
-```bash
-# 1. one-time: install deps + submodules
-CUDA=cu121 bash setup.sh
+Your `plot_truth` / `plot_pred` / `plot_oc` isn't returning a
+well-formed `(H, W, 3)` uint8. Re-read Step 5 — the smoke test would
+have caught this.
 
-# 2. write src/tasks/mytask.py + configs/train/mytask.yaml
+### Loss plateaus at a high value, never drops
 
-# 3. train
-python scripts/train.py --config configs/train/mytask.yaml
+Check the β histogram in TensorBoard. If it's stuck around 0.5 with
+no bimodal structure after several epochs: your OC attractive /
+repulsive terms aren't pushing. Try `q_min=0.5` or a smaller learning
+rate. Verify `object_id` is globally unique across events.
 
-# 4. watch
-tensorboard --logdir runs/mytask
+### `Augmentation changed N but not every per-hit tensor`
 
-# 5. evaluate
-python scripts/evaluate.py --config configs/train/mytask.yaml \
-    --checkpoint outputs/mytask/epoch_009.pt --split test
-
-# 6. write predictions + provenance back into HDF5
-python scripts/export_predictions.py --config configs/train/mytask.yaml \
-    --checkpoint outputs/mytask/epoch_009.pt --split test \
-    --output-group predictions_v1
-
-# 7. ONNX export of the heads
-python scripts/export_onnx.py --config configs/train/mytask.yaml \
-    --checkpoint outputs/mytask/epoch_009.pt --out outputs/mytask/heads.onnx
-```
+You wrote an augmentation that subselects `coord` but forgot one of
+your payload targets. Re-read
+[`src/augmentations/README.md`](../src/augmentations/README.md) §
+"Rules the framework relies on". The rule: if you change `N`, change
+it for **every** per-hit tensor consistently.
 
 ---
 
-## Further reading
+## What to read next
 
 * [`src/tasks/README.md`](../src/tasks/README.md) — the `OCTask`
-  interface in detail, with contracts for `__getitem__`, `collate`, and
-  each `plot_*` method.
-* [`src/augmentations/README.md`](../src/augmentations/README.md) — the
-  augmentation contract and how to add a new one.
-* [`docs/data_format.md`](data_format.md) — per-event and batch-level
-  schema, HDF5 layout produced by the shapes generator, invariants.
-* [`docs/architecture.md`](architecture.md) — model flowchart and OC
-  inference procedure (β-threshold + radius clustering).
+  interface reference, once you've got the shape of it.
+* [`src/augmentations/README.md`](../src/augmentations/README.md) —
+  how to add train-time noise / rotations / dropout.
+* [`examples/calorimeter/`](../examples/calorimeter/) — the full
+  runnable example behind this tutorial.
+* [`src/tasks/shapes.py`](../src/tasks/shapes.py) — a second, 2D
+  reference task. Diff it against the calorimeter to see what's
+  task-specific.
+* [`docs/architecture.md`](architecture.md) — what PTv3 + OC is doing
+  under the hood, if you want to know *why* the interface looks the
+  way it does.

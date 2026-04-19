@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from src.inference.cluster import beta_threshold_cluster
 from src.models.backbone import PTv3Backbone
 from src.models.heads import ObjectCondensationHeads
-from src.tasks import ShapesTask
+from src.tasks import ShapesTask, get_task_class  # noqa: F401
 
 
 def _git_sha() -> str:
@@ -45,24 +45,14 @@ def _git_sha() -> str:
 
 def _write_predictions(
     group: h5py.Group,
-    *,
-    beta: np.ndarray,
-    cluster_id: np.ndarray,
-    pid_pred: np.ndarray,
-    width_pred: np.ndarray,
-    height_pred: np.ndarray,
-    x_cluster: np.ndarray,
+    fields: dict[str, np.ndarray],
     overwrite: bool,
 ) -> None:
-    """Write per-hit predictions as gzip-compressed datasets."""
-    fields = {
-        "beta": beta,
-        "cluster_id": cluster_id,
-        "pid_pred": pid_pred,
-        "width_pred": width_pred,
-        "height_pred": height_pred,
-        "x_cluster": x_cluster,
-    }
+    """Write per-hit prediction tensors as gzip-compressed datasets.
+
+    ``fields`` maps HDF5 dataset name → numpy array. Caller decides which
+    predictions to persist (depends on which heads the model has).
+    """
     for k, v in fields.items():
         if k in group:
             if not overwrite:
@@ -71,6 +61,27 @@ def _write_predictions(
                 )
             del group[k]
         group.create_dataset(k, data=v, compression="gzip", compression_opts=4)
+
+
+def _fields_for_preds(preds: dict[str, torch.Tensor],
+                      cluster: torch.Tensor) -> dict[str, np.ndarray]:
+    """Build the {name: ndarray} dict of things to persist based on what
+    the model actually predicted. Shared scalars are always written;
+    per-head regressors/classifiers are written only if their output key
+    is present. Adapt this for your task's heads."""
+    out: dict[str, np.ndarray] = {
+        "beta": preds["beta"].cpu().numpy().astype(np.float32),
+        "cluster_id": cluster.cpu().numpy().astype(np.int64),
+        "x_cluster": preds["x"].cpu().numpy().astype(np.float32),
+    }
+    if "pid_logits" in preds:
+        out["pid_pred"] = preds["pid_logits"].argmax(-1).cpu().numpy().astype(np.int64)
+    for k in ("width", "height", "energy"):
+        if k in preds:
+            out[f"{k}_pred"] = preds[k].cpu().numpy().astype(np.float32)
+    if "momentum" in preds:
+        out["momentum_pred"] = preds["momentum"].cpu().numpy().astype(np.float32)
+    return out
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,7 +105,9 @@ def main() -> None:
     split_file = getattr(cfg.data, f"{args.split}_file")
     h5_path = Path(cfg.data.root) / split_file
 
-    task = ShapesTask(
+    task_name = getattr(cfg.data, "task_class", "ShapesTask")
+    TaskCls = get_task_class(task_name)
+    task = TaskCls(
         h5_path, normalize_coords=cfg.data.normalize_coords,
         max_hits=cfg.data.max_hits,
     )
@@ -138,18 +151,13 @@ def main() -> None:
                     )
                 del event_group[args.output_group]
             pgroup = event_group.create_group(args.output_group)
-            _write_predictions(
-                pgroup,
-                beta=preds["beta"].cpu().numpy().astype(np.float32),
-                cluster_id=cluster.cpu().numpy().astype(np.int64),
-                pid_pred=preds["pid_logits"].argmax(-1).cpu().numpy().astype(np.int64),
-                width_pred=preds["width"].cpu().numpy().astype(np.float32),
-                height_pred=preds["height"].cpu().numpy().astype(np.float32),
-                x_cluster=preds["x"].cpu().numpy().astype(np.float32),
-                overwrite=args.overwrite,
-            )
+            fields = _fields_for_preds(preds, cluster)
+            _write_predictions(pgroup, fields, overwrite=args.overwrite)
             pgroup.attrs["t_beta"] = t_beta
             pgroup.attrs["t_d"] = t_d
+            pgroup.attrs["fields_written"] = np.array(
+                list(fields.keys()), dtype="S32"
+            )
 
         # Global provenance: one shared group at the file root.
         meta_root = f.require_group(f"predictions_meta/{args.output_group}")
