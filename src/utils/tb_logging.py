@@ -11,12 +11,16 @@ Three kinds of artefacts are logged here:
        +-------------------------+
        | PRED     (matched)      |
        +-------------------------+
-       | BETA     (heatmap)      |
+       | OC       (x, alpha=beta)|
        +-------------------------+
 
    Predicted-cluster colors are matched to truth object colors via
    majority-vote assignment, so the same shape keeps the same color
-   across panels when the model gets it right.
+   across panels when the model gets it right. The OC panel scatters
+   per-hit cluster coordinates (PCA-reduced to 2D if
+   ``cluster_dim > 2``), colored by each hit's input RGB feature and
+   alpha-blended by beta (higher beta → more opaque). A small inset of
+   the original shape image is pasted in the corner for reference.
 
 3. Cluster-coord projector (via :func:`log_oc_embedding`) — raw OC
    coordinates per hit, labeled by truth object id.
@@ -108,28 +112,96 @@ def _paint_cluster_canvas(
     return canvas
 
 
-def _paint_beta_canvas(coord_xy: np.ndarray, beta: np.ndarray, fw: int, fh: int) -> np.ndarray:
-    """Viridis-ish heatmap: low beta → dark blue, high beta → yellow/white.
+def _pca_to_2d(x: np.ndarray) -> np.ndarray:
+    """Linear projection of ``x`` (N, D) to (N, 2) via centered SVD.
 
-    We implement a minimal 3-stop colormap to avoid a matplotlib dep.
+    D == 1 is zero-padded; D == 2 is returned as-is (PCA is identity
+    up to rotation and we want the axes stable across steps).
     """
-    canvas = np.broadcast_to(_BG_COLOR, (fh, fw, 3)).copy()
-    b = np.clip(beta, 0.0, 1.0)
-    # 3-stop ramp: (dark purple) 0.0 → (teal) 0.5 → (yellow) 1.0
-    stops = np.array(
-        [[ 68,   1,  84],
-         [ 33, 145, 140],
-         [253, 231,  37]],
-        dtype=np.float32,
-    )
-    t = b * 2.0
-    lo = np.clip(np.floor(t).astype(int), 0, 1)
-    hi = lo + 1
-    frac = (t - lo)[:, None]
-    color = stops[lo] * (1 - frac) + stops[hi] * frac
-    color = color.astype(np.uint8)
-    for (x, y), c in zip(coord_xy, color):
-        canvas[int(y), int(x)] = c
+    if x.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    if x.shape[1] == 1:
+        return np.concatenate([x, np.zeros_like(x)], axis=1).astype(np.float32)
+    if x.shape[1] == 2:
+        return x.astype(np.float32)
+    xc = x - x.mean(axis=0, keepdims=True)
+    _u, _s, vt = np.linalg.svd(xc, full_matrices=False)
+    return (xc @ vt.T[:, :2]).astype(np.float32)
+
+
+def _paint_shape_inset(
+    coord_xy: np.ndarray,
+    feat_rgb: np.ndarray,
+    src_fw: int,
+    src_fh: int,
+    inset_w: int,
+    inset_h: int,
+) -> np.ndarray:
+    """Scaled-down copy of the raw shape image (points colored by feat)."""
+    inset = np.broadcast_to(_BG_COLOR, (inset_h, inset_w, 3)).copy()
+    if coord_xy.shape[0] == 0:
+        return inset
+    sx = (inset_w - 1) / max(1, src_fw - 1)
+    sy = (inset_h - 1) / max(1, src_fh - 1)
+    rgb = (np.clip(feat_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+    ix = np.clip((coord_xy[:, 0] * sx).astype(np.int64), 0, inset_w - 1)
+    iy = np.clip((coord_xy[:, 1] * sy).astype(np.int64), 0, inset_h - 1)
+    inset[iy, ix] = rgb
+    return inset
+
+
+def _paint_oc_scatter(
+    oc_xy: np.ndarray,
+    feat_rgb: np.ndarray,
+    beta: np.ndarray,
+    fw: int,
+    fh: int,
+    image_xy_px: np.ndarray,
+    margin_px: int = 6,
+    dot_size: int = 2,
+    inset_frac: float = 0.28,
+) -> np.ndarray:
+    """Scatter of (PCA-reduced) OC coords, colored by feat, alpha by beta.
+
+    Points with higher ``beta`` are rendered more opaque against the
+    white canvas; points near beta ≈ 0 fade into the background.
+    A small inset of the original shape image is pasted top-right for
+    visual cross-reference.
+    """
+    canvas = np.broadcast_to(_BG_COLOR, (fh, fw, 3)).copy().astype(np.float32)
+    if oc_xy.shape[0] > 0:
+        xmin, ymin = oc_xy.min(axis=0)
+        xmax, ymax = oc_xy.max(axis=0)
+        xr = max(float(xmax - xmin), 1e-6)
+        yr = max(float(ymax - ymin), 1e-6)
+        px = ((oc_xy[:, 0] - xmin) / xr) * (fw - 2 * margin_px) + margin_px
+        py = ((oc_xy[:, 1] - ymin) / yr) * (fh - 2 * margin_px) + margin_px
+
+        rgb = np.clip(feat_rgb, 0.0, 1.0) * 255.0
+        alpha = np.clip(beta, 0.0, 1.0)[:, None]
+        blended = alpha * rgb + (1.0 - alpha) * 255.0
+
+        half = dot_size // 2
+        for (cx, cy), c in zip(zip(px, py), blended):
+            x0 = max(0, int(cx) - half)
+            y0 = max(0, int(cy) - half)
+            x1 = min(fw, x0 + dot_size)
+            y1 = min(fh, y0 + dot_size)
+            canvas[y0:y1, x0:x1] = c
+
+    canvas = canvas.astype(np.uint8)
+
+    # Inset: top-right corner with 1px black border.
+    inset_h = max(8, int(fh * inset_frac))
+    inset_w = max(8, int(fw * inset_frac))
+    inset = _paint_shape_inset(image_xy_px, feat_rgb, fw, fh, inset_w, inset_h)
+    pad = 1
+    y0 = pad
+    y1 = y0 + inset_h
+    x1 = fw - pad
+    x0 = x1 - inset_w
+    canvas[y0 - pad:y1 + pad, x0 - pad:x1 + pad] = 0  # border
+    canvas[y0:y1, x0:x1] = inset
     return canvas
 
 
@@ -170,9 +242,11 @@ def _denormalize_coords(coord: np.ndarray, fw: int, fh: int) -> np.ndarray:
 
 def _render_one_event(
     coord: np.ndarray,
+    feat: np.ndarray,
     truth: np.ndarray,
     pred: np.ndarray,
     beta: np.ndarray,
+    oc_x: np.ndarray,
     frame: tuple[int, int],
     event_idx: int,
     upscale: int,
@@ -195,7 +269,8 @@ def _render_one_event(
         label_to_color=pred_color_table,
         unclaimed_color=unclaimed,
     )
-    beta_img = _paint_beta_canvas(xy, beta, fw, fh)
+    oc_xy = _pca_to_2d(oc_x)
+    oc_img = _paint_oc_scatter(oc_xy, feat, beta, fw, fh, xy)
 
     # optional per-panel labels, then upscale the whole cell together so
     # labels scale with the image.
@@ -205,14 +280,14 @@ def _render_one_event(
 
     pad_px = 2
     v_pad = np.full((fh, pad_px, 3), 0, dtype=np.uint8)
-    row = np.concatenate([truth_img, v_pad, pred_img, v_pad, beta_img], axis=1)
+    row = np.concatenate([truth_img, v_pad, pred_img, v_pad, oc_img], axis=1)
     total_w = row.shape[1]
 
     # Sub-header: one label per panel, positioned at each panel's left edge.
     x_truth = 2
     x_pred = fw + pad_px + 2
-    x_beta = 2 * (fw + pad_px) + 2
-    sub_labels = [(x_truth, "TRUTH"), (x_pred, "PRED"), (x_beta, "BETA")]
+    x_oc = 2 * (fw + pad_px) + 2
+    sub_labels = [(x_truth, "TRUTH"), (x_pred, "PRED"), (x_oc, "OC")]
     sub_strip = _make_label_strip(total_w, sub_labels, bar_px=12)
 
     # Top header spans the whole cell.
@@ -225,9 +300,11 @@ def _render_one_event(
 
 def render_prediction_grid(
     coords: list[np.ndarray],
+    feats: list[np.ndarray],
     truths: list[np.ndarray],
     preds: list[np.ndarray],
     betas: list[np.ndarray],
+    oc_xs: list[np.ndarray],
     frames: list[tuple[int, int]],
     grid: tuple[int, int] = (4, 4),
     upscale: int = 3,
@@ -235,14 +312,17 @@ def render_prediction_grid(
 ) -> np.ndarray:
     """Compose per-event cells into a (rows x cols) grid image (CHW uint8).
 
-    ``coords[i]`` is (N_i, 3) pixel/normalized xy; other lists are (N_i,).
+    ``coords[i]`` is (N_i, 3) pixel/normalized xy; ``feats[i]`` is (N_i, 3)
+    RGB in [0,1]; ``oc_xs[i]`` is (N_i, D) cluster coords; the remaining
+    lists are (N_i,).
     """
     rows, cols = grid
     n_events = min(len(coords), rows * cols)
     cells = []
     for i in range(n_events):
         cell = _render_one_event(
-            coords[i], truths[i], preds[i], betas[i], frames[i], i, upscale,
+            coords[i], feats[i], truths[i], preds[i], betas[i], oc_xs[i],
+            frames[i], i, upscale,
         )
         cells.append(cell)
     if not cells:
@@ -298,20 +378,27 @@ def log_prediction_grid(
     offsets = batch["offset"].detach().cpu().numpy().tolist()
     frames = batch["frame"].detach().cpu().numpy().tolist()
     coord = batch["coord"].detach().cpu().numpy()
+    feat = batch["feat"].detach().cpu().numpy()
     truth = batch["object_id"].detach().cpu().numpy()
     pred = pred_cluster.detach().cpu().numpy()
     beta = preds["beta"].detach().cpu().numpy()
+    oc_x = preds["x"].detach().cpu().numpy()
 
     starts = [0] + offsets[:-1]
-    coords, truths, preds_l, betas, fr = [], [], [], [], []
+    coords, feats, truths, preds_l, betas, oc_xs, fr = [], [], [], [], [], [], []
     for i, (s, e) in enumerate(zip(starts, offsets)):
         coords.append(coord[s:e])
+        feats.append(feat[s:e])
         truths.append(truth[s:e])
         preds_l.append(pred[s:e])
         betas.append(beta[s:e])
+        oc_xs.append(oc_x[s:e])
         fr.append(tuple(int(x) for x in frames[i]))
 
-    img = render_prediction_grid(coords, truths, preds_l, betas, fr, grid=grid, upscale=upscale)
+    img = render_prediction_grid(
+        coords, feats, truths, preds_l, betas, oc_xs, fr,
+        grid=grid, upscale=upscale,
+    )
     writer.add_image(tag, img, global_step=step, dataformats="CHW")
 
 
@@ -396,8 +483,15 @@ so you can watch them converge). Each cell stacks three rows:
    at this pixel" (white). Early in training, expect most of each shape to
    be light gray — β hasn't spiked yet. As training progresses those light
    gray regions should fill in with matched color.
-3. **BETA** — per-pixel β heatmap (dark = low, yellow = high). A well-trained
-   model spikes β in tight condensation regions near the shape centroids.
+3. **OC** — scatter of the learned cluster coordinates `x` for every hit
+   in the event. Each point is colored by its **input RGB feature** (i.e.
+   the color of the shape it belongs to in the source image) and alpha-
+   blended against a white background by β — high-β hits render fully
+   opaque, low-β hits fade out. If `cluster_dim > 2`, coordinates are
+   reduced to 2D with a PCA projection (no t-SNE / UMAP). A small inset
+   of the original shape image is pasted top-right for reference, so you
+   can visually tie each OC-space cluster back to the shape that produced
+   it.
 
 Cell caption format: `event <i>  TRUTH  n=<n_truth_shapes>` and
 `PRED  k=<n_pred_clusters>  matched=<k_matched>`. A shape is "matched" if its
@@ -424,8 +518,8 @@ What to look for as training progresses:
 subsample of hits from the fixed viz batch. Each point is one hit.
 
 - The scatter lives in `cluster_dim` dimensions (see `model.heads.cluster_dim`
-  in the config). The projector page lets you pick PCA / t-SNE / UMAP for
-  viewing.
+  in the config). Stick to the **PCA** tab in the projector page — t-SNE /
+  UMAP are not used by this run.
 - Each point is labeled with its truth `object_id`. Click **"color by label"**
   to color by object id — ideally each object forms a tight, isolated cloud
   (attractive term) that is far from other objects (repulsive term).

@@ -27,7 +27,7 @@ model:
     shuffle_orders: true
     grid_size: 0.005            # fine grid in [0,1]-normalized coords
   heads:
-    cluster_dim: 3              # 3D OC space (easy to visualize)
+    cluster_dim: 2              # 2D OC space (directly plottable, no projection)
     hidden_dim: 128
     n_pid_classes: 5            # 5 shape classes
     predict_momentum: false     # repurposed to w/h only; momentum head disabled
